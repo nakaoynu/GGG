@@ -1,4 +1,5 @@
 # 5種類の温度に対するスペクトルの表示(B)
+# 高磁場下での透過率スペクトルを計算し、グラフにプロットするコード
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
