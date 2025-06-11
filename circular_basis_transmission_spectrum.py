@@ -21,7 +21,7 @@ mu0 = 4 * np.pi * 1e-7 # 真空の透磁率 [H/m]
 g_factor = 1.95      # g因子
 eps_bg = 11.5        # 背景比誘電率 (論文より)
 s = 3.5              # Gd3+のスピン量子数 (S=7/2)
-N_spin = 4.22e27     # スピン密度 [m^-3] (論文の情報を基に計算・仮定)
+N_spin = 4.22e27     # スピン密度 [m^-3] (論文の情報を基に計算・仮定)←確認する必要あり
 d = 0.1578e-3        # サンプルの厚み [m]
 
 # 結晶場パラメータ (B_k^q = B_k / f_k)
@@ -34,9 +34,9 @@ B4 = B4_param * factor_b4 # [K]
 B6 = B6_param * factor_b6 # [K]
 
 # シミュレーション条件
-T = 35.0             # 温度 [K]
-B_ext = 7.8          # 外部静磁場 [T]
-gamma = 2.5e11       # 緩和周波数 [Hz] (スペクトルの線幅を決定)
+T = 35.0             # 温度 [K]←条件すり合わせ必要
+B_ext = 7.8          # 外部静磁場 [T]←条件すり合わせ必要
+gamma = 2.5e11       # 緩和周波数 [Hz] (スペクトルの線幅を決定)←条件すり合わせ必要
 
 # --- 2. 演算子の定義 ---
 
@@ -94,7 +94,7 @@ def get_hamiltonian(B_ext_z):
     # 論文より、B_ext || [001] (c-axis) を想定
     H_cf = (B4 * kB) * (O04 + 5 * O44) + (B6 * kB) * (O06 - 21 * O46)
     
-    # ゼーマンハミルトニアン (磁場はz方向と仮定)
+    # ゼーマンハミルトニアン (磁場はz方向と仮定)←修正必要
     H_zee = g_factor * muB * B_ext_z * Sz
     
     return H_cf + H_zee
@@ -205,6 +205,8 @@ if __name__ == '__main__':
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.xlim(min(freq_thz), max(freq_thz))
+    plt.savefig('ggg_transmission_spectrum.png', dpi=300)
+    plt.tight_layout()
     
-    plt.show()
+    #plt.show()
 
