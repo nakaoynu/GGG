@@ -7,11 +7,11 @@ GGG 透過スペクトルシミュレーション (Transmission Spectrum Simulat
 背景
 本研究は、空洞共振器中のGGGにおける光とマグノンの強結合を報告した以下の論文で示された物理現象の再現と、より深い理解を目的としています。
 
-実験的背景: Kritzell, T.E., Doumani, J., Asano, T. et al. "Paramagnets as a platform for Dicke physics." Nat. Photon. (2024).
+実験的背景: [GGGを用いたZeeman polriton形成](Kritzell, T.E., Doumani, J., Asano, T. et al. "Paramagnets as a platform for Dicke physics." Nat. Photon. (2024).)
 
-理論的背景: 計算手法は、主に以下の修士論文で展開されている理論に基づいています。
+理論的背景: 計算手法は、主に以下の卒業論文で展開されている理論に基づいています。
 
-坂田優貴, "超放射相転移の実現可能性の Zeeman ポラリトン形成に基づく検討", 横浜国立大学 修士論文 (2025).
+坂田優貴, "超放射相転移の実現可能性の Zeeman ポラリトン形成に基づく検討", 横浜国立大学 学部卒業論文 (2025).
 
 主な特徴
 ハミルトニアンの構築: スティーブンス演算子による結晶場ハミルトニアンと、外部静磁場によるゼーマンハミルトニアンを構築します。
