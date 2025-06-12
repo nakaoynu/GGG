@@ -1,4 +1,4 @@
-![image](https://github.com/user-attachments/assets/f6078b83-e02e-43e8-87ce-505ecc4bb4c8)# GGG 透過スペクトルシミュレーション (Transmission Spectrum Simulation for GGG)
+# GGG 透過スペクトルシミュレーション (Transmission Spectrum Simulation for GGG)
 
 ## 概要
 本リポジトリは、常磁性体であるガドリニウム・ガリウム・ガーネット (GGG) の円偏光基底における透過スペクトルを、線形応答理論に基づきシミュレーションするためのPythonコードを管理します。
@@ -33,7 +33,7 @@ $$
 H = H_{CF} + {H}_{Zee}
 $$
 
-ここで、$\mathcal{H}_{\text{CF}}$は結晶場ハミルトニアン、$\mathcal{H}_{\text{Zee}} = g \mu_B \mathbf{B} \cdot \mathbf{S}$ はZeemanハミルトニアンです。
+ここで、$H_{CF}$は結晶場ハミルトニアン、Zeemanハミルトニアンは$H_{Zee} = g \mu_{B} \mathbf{B} \cdot \mathbf{S}$です。
 
 ## 線形応答理論に基づく磁気感受率
 円偏光に対する磁気感受率は、久保公式に基づき以下のように計算されます。
@@ -43,8 +43,8 @@ $$
 \chi_\pm(\omega) \propto \sum_{n, m} \frac{P(E_m) - P(E_n)}{E_n - E_m - \hbar(\omega + i\gamma)} |\langle n| S_\pm |m \rangle|^2
 $$ 
 
-ここで, $P_{n}$は,エネルギー$E_{n}$を持つ準位の占有確率. $| \langle n | S_{\pm} |m \rangle |^2$
- はスピンの上昇/下降演算子$S_{pm}$による遷移の行列要素です。
+ここで, $P_{n}$は,エネルギー${E_{n}}$を持つ準位の占有確率. $| \langle n | S_{\pm} |m \rangle |^2$
+ はスピンの上昇/下降演算子$S_{\pm}$による遷移の行列要素です。
 
 ## セットアップと実行方法
 ### 必要なライブラリ
