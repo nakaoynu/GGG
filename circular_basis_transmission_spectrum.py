@@ -19,9 +19,9 @@ mu0 = 4 * np.pi * 1e-7 # 真空の透磁率 [H/m]
 
 # GGGの物質パラメータ
 g_factor = 1.95      # g因子
-eps_bg = 11.5        # 背景比誘電率 (論文より)
+eps_bg = 14.4       # 背景比誘電率 (論文より)
 s = 3.5              # Gd3+のスピン量子数 (S=7/2)
-N_spin = 4.22e27     # スピン密度 [m^-3] (論文の情報を基に計算・仮定)←確認する必要あり
+N_spin = 1.26e28     # スピン密度 [m^-3] (論文の情報を基に計算・仮定)←確認する必要あり
 d = 0.1578e-3        # サンプルの厚み [m]
 
 # 結晶場パラメータ (B_k^q = B_k / f_k)
@@ -43,14 +43,17 @@ gamma = 2.5e11       # 緩和周波数 [Hz] (スペクトルの線幅を決定)�
 def get_spin_operators(spin):
     """指定されたスピン量子数に対するスピン演算子行列を返す"""
     dim = int(2 * spin + 1)
+    #np.arangeを使用してスピンのm値を生成
     m = np.arange(spin, -spin - 1, -1)
     
     # Sz: 対角行列
     Sz = np.diag(m)
     
     # Sx, Sy (S+, S-から計算)
-    sp_diag = np.sqrt(spin * (spin + 1) - m[:-1] * (m[:-1] - 1))
-    sm_diag = np.sqrt(spin * (spin + 1) - m[1:] * (m[1:] + 1))
+    #m[:-1] は m の最後の要素を除外
+    #m[1:] は m の最初の要素を除外
+    sp_diag = np.sqrt(spin * (spin + 1) - m[1:] * (m[1:] - 1))
+    sm_diag = np.sqrt(spin * (spin + 1) - m[:-1] * (m[:-1] + 1))
     
     Sp = np.diag(sp_diag, k=1)
     Sm = np.diag(sm_diag, k=-1)
@@ -86,15 +89,15 @@ def get_stevens_operators():
 # --- 3. ハミルトニアンの計算 ---
 
 def get_hamiltonian(B_ext_z):
-    """与えられた外部磁場に対する全ハミルトニアンを計算する"""
+    """与えられた外部磁場に対する無摂動ハミルトニアンを計算する"""
     Sx, Sy, Sz, Sp, Sm = get_spin_operators(s)
     O04, O44, O06, O46 = get_stevens_operators()
     
     # 結晶場ハミルトニアン
-    # 論文より、B_ext || [001] (c-axis) を想定
+    # 山田の卒論より、B_ext || [001] (c-axis) を想定
     H_cf = (B4 * kB) * (O04 + 5 * O44) + (B6 * kB) * (O06 - 21 * O46)
     
-    # ゼーマンハミルトニアン (磁場はz方向と仮定)←修正必要
+    # ゼーマンハミルトニアン (磁場はz方向と仮定)
     H_zee = g_factor * muB * B_ext_z * Sz
     
     return H_cf + H_zee
@@ -103,7 +106,7 @@ def get_hamiltonian(B_ext_z):
 
 def calculate_susceptibility(omega, H, T, Sp, Sm):
     """
-    円偏光に対する磁気感受率 chi_plus, chi_minus を計算する
+    円偏光に対する磁気感受率 chi_R, chi_L を計算する
     式は thesis_sakata_lateset.pdf (Eq. 2-25, 2-26) を参照
     """
     eigenvalues, eigenvectors = np.linalg.eigh(H)
@@ -111,7 +114,7 @@ def calculate_susceptibility(omega, H, T, Sp, Sm):
     
     # 占有確率 P(E_n) = exp(-E_n / kBT) / Z
     Z = np.sum(np.exp(-eigenvalues / (kB * T)))
-    populations = np.exp(-eigenvalues / (kB * T)) / Z
+    populations = np.exp(-eigenvalues / (kB * T)) / Z #P(E_n)
     
     # 遷移要素 <n|S+|m>, <n|S-|m> を計算
     # U.H. @ Op @ U で、演算子を行列Hの固有基底に変換
@@ -142,9 +145,9 @@ def calculate_susceptibility(omega, H, T, Sp, Sm):
                 chi_minus += pop_diff * trans_prob_minus / denominator
 
     # 定数部分を乗算
-    prefactor = N_spin * (g_factor * muB)**2 / hbar
-    
-    return prefactor * chi_plus, prefactor * chi_minus
+    G0 = mu0 * N_spin * (g_factor * muB)**2 / 2 * hbar
+
+    return G0 * chi_plus, G0 * chi_minus
 
 def calculate_transmission(omega, chi):
     """感受率から透過率を計算する"""
