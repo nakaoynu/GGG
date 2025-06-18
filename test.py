@@ -1,13 +1,177 @@
 import numpy as np
-from circular_basis_transmission_spectrum import get_stevens_operators
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
 
-spin = 7 / 2  # Gd3+のスピン量子数
-m = np.arange(spin, -spin - 1, -1)
-print("m values:", m)
+# 日本語フォントの設定 (ご自身の環境に合わせてフォント名を変更してください)
+# Windows: "Meiryo", "Yu Gothic", "MS Gothic"
+# macOS: "Hiragino Sans"
+plt.rcParams['font.family'] = "Meiryo"
 
-O04, O44, O06, O46 = get_stevens_operators()
-print("Stevens operators:")
-print("O04:", O04)
-print("O44:", O44)
-print("O06:", O06)
-print("O46:", O46)
+# --- 1. 物理定数とシミュレーションパラメータ ---
+# これらの値は論文や既存コードを参考にしていますが、後で調整可能です。
+
+# 物理定数
+kB = 1.380649e-23  # ボルツマン定数 [J/K]
+muB = 9.274010e-24 # ボーア磁子 [J/T]
+hbar = 1.054571e-34 # ディラック定数 [J*s]
+c = 299792458      # 光速 [m/s]
+mu0 = 4.0 * np.pi * 1e-7 # 真空の透磁率 [H/m]
+
+# GGGの物質パラメータ
+g_factor = 1.95      # g因子
+eps_bg = 14.4       # 背景比誘電率 (論文より)
+s = 3.5              # Gd3+のスピン量子数 (S=7/2)
+N_spin = 1.26e28     # スピン密度 [m^-3] (論文の情報を基に計算・仮定)←確認する必要あり
+d = 0.1578e-3        # サンプルの厚み [m]
+G0 = mu0 * N_spin * (g_factor * muB)**2 / 2 * hbar # 磁気感受率の単位変換係数 [H/m]
+
+# 結晶場パラメータ (B_k^q = B_k / f_k)
+# thesis_sakata_latest.pdf の値を参考に調整
+B4_param = 0.8 / 240
+B6_param = 0.04 / 5040
+factor_b4 = 0.606
+factor_b6 = -1.513
+B4 = B4_param * factor_b4 # [K]
+B6 = B6_param * factor_b6 # [K]
+
+# シミュレーション条件
+T = 35.0             # 温度 [K]←条件すり合わせ必要
+B_ext = 7.8          # 外部静磁場 [T]←条件すり合わせ必要
+T_array = np.array([35, 50, 75, 95, 200, 250])  # 温度配列 [K]
+B_array = np.array([0.0, 7.8])  # 磁場配列，本来は4-9K at 0.2T [T]
+gamma = 1.1e11       # 緩和周波数 [Hz] (Elijahの論文よりスペクトルの線幅を決定)
+
+# --- 2. 演算子の定義 ---
+def get_spin_operators(spin):
+    """指定されたスピン量子数に対するスピン演算子行列を返す"""
+    # np.arangeを使用してスピンのm値を生成
+    m = np.arange(spin, -spin - 1, -1)
+    
+    # Sz: 対角行列
+    Sz = np.diag(m)
+    
+    return Sz
+
+def get_stevens_operators():
+    """スティーブンス演算子 O_k^q を返す (S=7/2 固定)"""
+    # 既存コード (f1_H.py) より引用
+    O04 = 60 * np.diag([7, -13, -3, 9, 9, -3, -13, 7])
+    
+    X = np.zeros((8, 8))
+    X[3, 7] = np.sqrt(35)
+    X[4, 0] = np.sqrt(35)
+    X[2, 6] = 5 * np.sqrt(3)
+    X[5, 1] = 5 * np.sqrt(3)
+    O44 = 12 * (X + X.T)
+    
+    O06 = 1260 * np.diag([1, -5, 9, -5, -5, 9, -5, 1])
+
+    X = np.zeros((8, 8))
+    X[3, 7] = 3 * np.sqrt(35)
+    X[4, 0] = 3 * np.sqrt(35)
+    X[2, 6] = -7 * np.sqrt(3)
+    X[5, 1] = -7 * np.sqrt(3)
+    O46 = 60 * (X + X.T)
+    
+    return O04, O44, O06, O46
+
+# --- 3. ハミルトニアンの計算 ---
+
+def get_hamiltonian(B_ext_z):
+    """与えられた外部磁場に対する無摂動ハミルトニアンを計算する"""
+    Sx, Sy, Sz, Sp, Sm = get_spin_operators(s)
+    O04, O44, O06, O46 = get_stevens_operators()
+    
+    # 結晶場ハミルトニアン
+    # 山田の卒論より、B_ext || [001] (c-axis) を想定
+    H_cf = (B4 * kB) * (O04 + 5 * O44) + (B6 * kB) * (O06 - 21 * O46)
+    
+    # ゼーマンハミルトニアン (磁場はz方向と仮定)
+    H_zee = g_factor * muB * B_ext_z * Sz
+    
+    return H_cf + H_zee
+
+# --- 4. 磁気感受率と透過率の計算 ---
+
+def calculate_susceptibility(omega, H, T):
+    """
+    円偏光に対する磁気感受率 chi_R, chi_L を計算する
+    式は thesis_sakata_lateset.pdf (Eq. 2-25, 2-26) を参照
+    """
+    eigenvalues, eigenvectors = np.linalg.eigh(H)
+    eigenvalues -= np.min(eigenvalues) # 基底状態をエネルギーのゼロ点に設定
+    
+    # 占有確率 P(E_n) = exp(-E_n / kBT) / Z
+    Z = np.sum(np.exp(-eigenvalues / (kB * T)))
+    populations = np.exp(-eigenvalues / (kB * T)) / Z #P(E_n)
+    
+    # 磁気感受率の計算
+    chi = 0.0
+    for i, m in enumerate(np.arange(-s, s, 1)):
+        delta_E = eigenvalues[i + 1] - eigenvalues[i]
+        delta_pop = populations[i + 1] - populations[i]
+        omega_0 = delta_E / hbar
+        chi += delta_pop * (s + m) * (s - m + 1) / ((omega_0 - omega) - (1j * gamma))
+
+    return G0 * chi
+
+def calculate_transmission(omega, chi):
+    """感受率から透過率を計算する"""
+    # 比透磁率 mu_r = 1 + chi
+    # thesis_sakata_lateset.pdf (Eq. 2-1) などを参照
+    # B形式ではなくH形式 (mu = 1 + chi) を採用
+    mu_r = 1 + chi
+    
+    # 複素屈折率 n_complex = sqrt(eps_bg * mu_r)
+    n_complex = np.sqrt(eps_bg * mu_r)
+    
+    # 透過係数 (Fabry-Perot効果を考慮)
+    # thesis_sakata_lateset.pdf (Eq. 2-46)，多重反射を考慮する必要あり
+    delta = n_complex * omega * d / c
+    t = 4 * n_complex * np.exp(-1j * delta) / ((1 + n_complex)**2)
+    
+    # 透過率 T = |t|^2
+    return np.abs(t)**2
+
+# --- 5. メイン実行ブロック ---
+if __name__ == '__main__':
+    # シミュレーションの周波数範囲 (THz -> Hz)
+    freq_thz = np.arange(4.0e11, 9.0e11, 0.5e11)  # 4THzから9THzまで
+    # 周波数をラジアン毎秒に変換
+    omega_rad_s = freq_thz * 2 * np.pi
+
+    # 結果を格納する配列
+    trans_R = []  # 右円偏光 (RCP)
+
+    # ハミルトニアンを計算 (周波数ループの外で一度だけ計算)
+    H = get_hamiltonian(B_ext)
+    Sx, Sy, Sz, Sp, Sm = get_spin_operators(s)
+
+    # 周波数ごとに計算を実行
+    print("シミュレーションを開始します...")
+    for i, omega in enumerate(omega_rad_s):
+        if (i + 1) % 20 == 0:
+            print(f"  ... {i+1}/{len(omega_rad_s)} 完了")
+            
+        chi_R = calculate_susceptibility(omega, H, T)
+
+        T_R = calculate_transmission(omega, chi_R)
+
+        trans_R.append(T_R)
+    print("シミュレーション完了。")
+    
+    # --- 6. グラフ描画 ---
+    # 横軸ω，縦軸透過率Tのグラフを描画
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(freq_thz*1e-12, trans_R, label='右円偏光 (RCP)', color='red')
+
+    plt.xlabel('周波数 (THz)')
+    plt.ylabel('透過率 T')
+    plt.title(f'GGG 透過スペクトルシミュレーション (T={T} K, B={B_ext} T)')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.xlim(min(freq_thz), max(freq_thz))
+    plt.savefig('ggg_transmission_spectrum.png', dpi=300)
+    plt.tight_layout()
+    

@@ -160,7 +160,6 @@ def calculate_transmission(omega, chi):
     n_complex = np.sqrt(eps_bg * mu_r)
     
     # 透過係数 (Fabry-Perot効果を考慮)
-    # thesis_sakata_lateset.pdf (Eq. 2-46)
     delta = n_complex * omega * d / c
     t = 4 * n_complex * np.exp(-1j * delta) / ((1 + n_complex)**2)
     
@@ -197,6 +196,7 @@ if __name__ == '__main__':
     print("シミュレーション完了。")
     
     # --- 6. グラフ描画 ---
+    # 横軸ω，縦軸透過率Tのグラフを描画
     plt.figure(figsize=(10, 6))
     
     plt.plot(freq_thz, trans_plus, label='右円偏光 (RCP)', color='red')
