@@ -1,186 +1,146 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-# 5種類の温度に対するスペクトルの表示(B)
-# 高磁場下での透過率スペクトルを計算し、グラフにプロットするコード
-
 import numpy as np
 import matplotlib
-# GUIバックエンドがない環境でも動作するように 'Agg' を指定
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 
-# --- フォント設定の堅牢化 ---
+# --- フォント設定 ---
 try:
     plt.rcParams['font.family'] = "Meiryo"
 except RuntimeError:
     print("日本語フォント 'Meiryo' が見つかりません。デフォルトのフォントを使用します。")
-    # 必要に応じて、ご自身の環境にインストールされている日本語フォント名に変更してください
-    # (例: "Yu Gothic", "Hiragino Sans", "IPAexGothic")
 
-# --- 定数と行列の定義 ---
+# --- 1. 演算子とハミルトニアンを定義する関数 ---
 
-# スティーブンス演算子
-O04 = 60 * np.diag([7, -13, -3, 9, 9, -3, -13, 7])
+def get_spin_operators(spin):
+    # (変更なし)
+    dim = int(2 * spin + 1)
+    m = np.arange(spin, -spin - 1, -1)
+    Sz = np.diag(m)
+    sp_diag = np.sqrt(spin * (spin + 1) - m[:-1] * (m[:-1] - 1))
+    sm_diag = np.sqrt(spin * (spin + 1) - m[1:] * (m[1:] + 1))
+    Sp = np.diag(sp_diag, k=1)
+    Sm = np.diag(sm_diag, k=-1)
+    Sx = 0.5 * (Sp + Sm)
+    Sy = -0.5j * (Sp - Sm)
+    return Sx, Sy, Sz, Sp, Sm
 
-X_44_upper = np.zeros((8, 8))
-X_44_upper[3, 7] = np.sqrt(35)
-X_44_upper[4, 0] = np.sqrt(35)
-X_44_upper[2, 6] = 5 * np.sqrt(3)
-X_44_upper[5, 1] = 5 * np.sqrt(3)
-O44 = 12 * (X_44_upper + X_44_upper.T)
+def get_stevens_operators():
+    # (変更なし)
+    O04 = 60 * np.diag([7, -13, -3, 9, 9, -3, -13, 7])
+    X = np.zeros((8, 8)); X[3, 7] = np.sqrt(35); X[4, 0] = np.sqrt(35); X[2, 6] = 5 * np.sqrt(3); X[5, 1] = 5 * np.sqrt(3)
+    O44 = 12 * (X + X.T)
+    O06 = 1260 * np.diag([1, -5, 9, -5, -5, 9, -5, 1])
+    X = np.zeros((8, 8)); X[3, 7] = 3 * np.sqrt(35); X[4, 0] = 3 * np.sqrt(35); X[2, 6] = -7 * np.sqrt(3); X[5, 1] = -7 * np.sqrt(3)
+    O46 = 60 * (X + X.T)
+    return O04, O44, O06, O46
 
-O06 = 1260 * np.diag([1, -5, 9, -5, -5, 9, -5, 1])
+def get_hamiltonian(B_ext_z, s, g_factor, kB, muB, B4, B6):
+    # (変更なし)
+    _, _, Sz, _, _ = get_spin_operators(s)
+    O04, O44, O06, O46 = get_stevens_operators()
+    H_cf = (B4 * kB) * (O04 + 5 * O44) + (B6 * kB) * (O06 - 21 * O46)
+    H_zee = g_factor * muB * B_ext_z * Sz
+    return H_cf + H_zee
 
-X_46_upper = np.zeros((8, 8))
-X_46_upper[3, 7] = 3 * np.sqrt(35)
-X_46_upper[4, 0] = 3 * np.sqrt(35)
-X_46_upper[2, 6] = -7 * np.sqrt(3)
-X_46_upper[5, 1] = -7 * np.sqrt(3)
-O46 = 60 * (X_46_upper + X_46_upper.T)
+# --- 2. 物理量を計算する関数 ---
 
-# スピン演算子
-Sz = np.diag([3.5, 2.5, 1.5, 0.5, -0.5, -1.5, -2.5, -3.5])
+def calculate_susceptibility_tensor(omega, H, T, S_ops, N_spin, g_factor, muB, kB, hbar, gamma):
+    """
+    【新しい関数】磁気感受率テンソル chi_ij を計算する
+    """
+    eigenvalues, eigenvectors = np.linalg.eigh(H)
+    eigenvalues -= np.min(eigenvalues)
+    
+    Z = np.sum(np.exp(-eigenvalues / (kB * T)))
+    if Z == 0: return np.zeros((3, 3), dtype=complex)
+    populations = np.exp(-eigenvalues / (kB * T)) / Z
+    
+    # Sx, Sy, Sz をエネルギー固有基底に変換
+    S_eig_basis = [evec.conj().T @ S @ evec for S, evec in zip(S_ops, [eigenvectors]*3)]
 
-# Onnに与えられた係数
-B4_base = 0.8 / 240
-B6_base = 0.04 / 5040
-factor_b4 = 0.6060886
-factor_b6 = -1.513
-B4 = B4_base * factor_b4  # [K]
-B6 = B6_base * factor_b6  # [K]
+    chi_tensor = np.zeros((3, 3), dtype=complex)
+    
+    for n in range(len(eigenvalues)):
+        for m in range(len(eigenvalues)):
+            if n == m: continue
+                
+            pop_diff = populations[m] - populations[n]
+            denominator = (eigenvalues[n] - eigenvalues[m]) - hbar * (omega + 1j * gamma)
+            if np.abs(denominator) < 1e-30: continue
 
-# 物理定数とシミュレーションパラメータ
-g = 1.95
-eps_BG = 11.5
-c = 299792458
-kB = 1.381e-23
-muB = 9.274e-24
-hbar = 1.055e-34
-T_array = [35, 50, 75, 95, 200, 250]
-B_array = [0.0, 7.8]
-g0_const = 6.0e11
-gamma = 2.5e11
-d = 0.1578e-3
-s = 3.5
+            # テンソルの各成分(ij)を計算
+            for i in range(3):
+                for j in range(3):
+                    # 遷移要素の積 <n|Si|m> * <m|Sj|n> = <n|Si|m> * (<n|Sj|m>)*
+                    transition_term = S_eig_basis[i][n, m] * np.conj(S_eig_basis[j][n, m])
+                    chi_tensor[i, j] += pop_diff * transition_term / denominator
+    
+    prefactor = N_spin * (g_factor * muB)**2 / hbar
+    return prefactor * chi_tensor
 
-# --- ヘルパー関数 ---
+def calculate_transmittance(omega, chi, eps_bg, d, c):
+    # (変更なし)
+    if np.abs(1 - chi) < 1e-9: mu_r = np.inf
+    else: mu_r = 1 / (1 - chi)
+    n_complex = np.sqrt(eps_bg * mu_r)
+    if np.abs(1 + n_complex) < 1e-9: return 0.0
+    delta = n_complex * omega * d / c
+    t = 4 * n_complex * np.exp(-1j * delta) / ((1 + n_complex)**2)
+    return np.abs(t)**2
 
-def Pm(Em, Z, T):
-    """ポピュレーション（占有確率）を計算する関数"""
-    if Z == 0:
-        return 0
-    return np.exp(-Em / (kB * T)) / Z
-
-# --- メイン処理 ---
-
+# --- 3. メイン処理 ---
 def main():
-    """シミュレーションのメイン処理を実行する関数"""
+    # パラメータ設定 (変更なし)
+    kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458
+    g_factor = 1.95; eps_bg = 14.44; s = 3.5; N_spin = 1.26e28; d = 0.1578e-3; gamma = 5.0e11
+    B4 = (0.8 / 240) * 0.606; B6 = (0.04 / 5040) * -1.513
+    T_array = [35, 50, 75, 95, 200, 250]; B_ext = 7.8
+    
     print("シミュレーションを開始します...")
+    freq_thz = np.linspace(0.1, 1.5, 400)
+    omega_rad_s = freq_thz * 1e12 * 2 * np.pi
     
-    omega_array = []
-    value_vector = [[] for _ in range(len(T_array))]
-
-    # 結晶場ハミルトニアンは温度に依存しないため、ループの外で計算
-    H_CF = (B4 * kB) * (O04 + 5.0 * O44) + (B6 * kB) * (O06 - 21.0 * O46)
+    Sx, Sy, Sz, _, _ = get_spin_operators(s)
+    S_ops = [Sx, Sy, Sz] # 演算子をリストにまとめる
+    H = get_hamiltonian(B_ext, s, g_factor, kB, muB, B4, B6)
     
-    # 周波数配列の作成
-    freq_range = np.arange(0.1e12, 7e12, 0.01e12) # 周波数ステップを少し細かく
+    transmittance_vectors = []
 
-    for i, T in enumerate(T_array):
+    for T in T_array:
         print(f"  T = {T} K の計算中...")
-        value_array = []
-        """
-        # --- 背景透過係数の計算 (B=0) ---
-        H_bg = H_CF  # B=0 の場合, H_Zee は 0
-        eigenvalues_bg, _ = np.linalg.eigh(H_bg)
-        Z_bg = np.sum(np.exp(-eigenvalues_bg / (kB * T)))
-        
-        # B=0, g0=0 なので chi=0 となり、t_BG は周波数にのみ依存する
-        n_bg = np.sqrt(eps_BG) # mu=1
-        impe_bg = 1 / np.sqrt(eps_BG)
-        
-        t_BG_list = []
-        for omega in freq_range:
-            lamda = c / (omega / (2 * np.pi))
-            delta_bg = 2 * np.pi * n_bg * d / lamda
-            t_bg = np.exp(delta_bg * 1j) * 4 * impe_bg / (1 + impe_bg)**2
-            t_BG_list.append(t_bg)
-        """
-
-        # --- 実際の透過率の計算 (B > 0) ---
-        B = B_array[1]
-        g0 = np.sqrt(B) * g0_const / np.sqrt(21.5) # この 21.5 は物理的意味の確認が必要
-        H_Zee = (g * muB * B) * Sz
-        H = H_CF + H_Zee
-        eigenvalues, _ = np.linalg.eigh(H)
-        Z = np.sum(np.exp(-eigenvalues / (kB * T)))
-
-        for j, omega in enumerate(freq_range):
-            chi = 0.0
-            for num, m_val in enumerate(np.arange(-3.5, 4.0, 1.0)):
-                if num + 1 < len(eigenvalues):
-                    delta_E = eigenvalues[num + 1] - eigenvalues[num]
-                    omega_0 = delta_E / hbar
-                    denominator = (omega_0 - omega - (1j * gamma / 2))
-                    if np.abs(denominator) > 1e-30:
-                        term = (4 * g0**2 / (2 * np.pi * gamma) * (s + m_val) * (s - m_val + 1) * (Pm(eigenvalues[num + 1], Z, T) - Pm(eigenvalues[num], Z, T)))
-                        chi += term / denominator
+        transmittance_data = []
+        for omega in omega_rad_s:
+            # ★ 磁気感受率テンソルを計算
+            chi_tensor = calculate_susceptibility_tensor(
+                omega, H, T, S_ops, N_spin, g_factor, muB, kB, hbar, gamma)
             
-            chi = -chi
+            # ★ テンソルから右円偏光感受率を計算 (chi_R = chi_xx - i*chi_xy)
+            chi_xx = chi_tensor[0, 0]
+            chi_xy = chi_tensor[0, 1]
+            chi_R = chi_xx - 1j * chi_xy
             
-            if np.abs(1 - chi) < 1e-9: # ゼロ割を避ける
-                mu = np.inf
-            else:
-                mu = 1 / (1 - chi)
-
-            n = np.sqrt(eps_BG * mu)
-            impe = np.sqrt(mu / eps_BG)
-            lamda = c / (omega / (2 * np.pi))
-            delta = 2 * np.pi * n * d / lamda
-            t = np.exp(delta * 1j) * 4 * impe / (1 + impe)**2
+            T_R = calculate_transmittance(omega, chi_R, eps_bg, d, c)
+            transmittance_data.append(T_R)
             
-            y = abs(t - t_BG_list[j])**2
-            value_array.append(y)
-
-            if i == 0:
-                omega_array.append(omega / (2 * np.pi * 1e12)) # THzに変換
-
-        # --- ゼロ除算エラーの防止 ---
-        min_val = np.min(value_array)
-        max_val = np.max(value_array)
-
-        if max_val == min_val:
-            # 計算結果が平坦な場合、ゼロ除算を避ける
-            normalized_values = np.zeros_like(value_array) + i
-        else:
-            normalized_values = (np.array(value_array) - min_val) / (max_val - min_val) + i
-            
-        value_vector[i] = normalized_values
-
-    print("グラフを描画し、'f_B_spectrum.png' に保存します...")
-    # --- グラフ描画 ---
+        transmittance_vectors.append(np.array(transmittance_data))
+    
+    # グラフ描画 (変更なし)
+    print("グラフを描画し、'final_spectrum_tensor_calc.png' に保存します...")
     plt.figure(figsize=(10, 8))
-    for i, values in enumerate(value_vector):
-        plt.plot(omega_array, values, label=f"T={T_array[i]} K")
-        
-        # ピーク検出
-        peaks, _ = find_peaks(values, height=i+0.1, distance=5)
-        peak_frequencies = [omega_array[p] for p in peaks]
-        peak_values = [values[p] for p in peaks]
-        
-        # ピークをプロット
-        plt.scatter(peak_frequencies, peak_values, color='red', zorder=5)
-
-    plt.title(f"透過スペクトル (B={B_array[1]} T, B-form)")
+    for i, T_data in enumerate(transmittance_vectors):
+        offset = i * 0.5 
+        plt.plot(freq_thz, T_data + offset, label=f"T={T_array[i]} K")
+    plt.title(f"絶対透過率スペクトル (B={B_ext} T, B-form, 右円偏光)")
     plt.xlabel("周波数 (THz)")
-    plt.ylabel("$|t-t_{BG}|^2$ (規格化・オフセットあり)")
+    plt.ylabel("透過率 T (オフセットあり)")
     plt.legend()
     plt.grid(True, linestyle='--')
-    plt.savefig('f_B_spectrum.png', dpi=300)
+    plt.savefig('final_spectrum_tensor_calc.png', dpi=300)
     print("保存が完了しました。")
 
-# --- スクリプト実行のエントリーポイント ---
 if __name__ == '__main__':
     main()

@@ -37,8 +37,6 @@ B6 = B6_param * factor_b6 # [K]
 # シミュレーション条件
 T = 35.0             # 温度 [K]←条件すり合わせ必要
 B_ext = 7.8          # 外部静磁場 [T]←条件すり合わせ必要
-T_array = np.array([35, 50, 75, 95, 200, 250])  # 温度配列 [K]
-B_array = np.array([0.0, 7.8])  # 磁場配列，本来は4-9K at 0.2T [T]
 gamma = 1.1e11       # 緩和周波数 [Hz] (Elijahの論文よりスペクトルの線幅を決定)
 
 # --- 2. 演算子の定義 ---
@@ -46,7 +44,7 @@ def get_spin_operators(spin):
     """指定されたスピン量子数に対するスピン演算子行列を返す"""
     # np.arangeを使用してスピンのm値を生成
     m = np.arange(spin, -spin - 1, -1)
-    
+
     # Sz: 対角行列
     Sz = np.diag(m)
     
@@ -79,7 +77,7 @@ def get_stevens_operators():
 
 def get_hamiltonian(B_ext_z):
     """与えられた外部磁場に対する無摂動ハミルトニアンを計算する"""
-    Sx, Sy, Sz, Sp, Sm = get_spin_operators(s)
+    Sz= get_spin_operators(s)
     O04, O44, O06, O46 = get_stevens_operators()
     
     # 結晶場ハミルトニアン
@@ -145,7 +143,7 @@ if __name__ == '__main__':
 
     # ハミルトニアンを計算 (周波数ループの外で一度だけ計算)
     H = get_hamiltonian(B_ext)
-    Sx, Sy, Sz, Sp, Sm = get_spin_operators(s)
+    Sz = get_spin_operators(s)
 
     # 周波数ごとに計算を実行
     print("シミュレーションを開始します...")
@@ -158,6 +156,7 @@ if __name__ == '__main__':
         T_R = calculate_transmission(omega, chi_R)
 
         trans_R.append(T_R)
+        print(f"ω = {omega:.2e} rad/s, 透過率 T_R = {T_R:.4f}")
     print("シミュレーション完了。")
     
     # --- 6. グラフ描画 ---
@@ -171,7 +170,7 @@ if __name__ == '__main__':
     plt.title(f'GGG 透過スペクトルシミュレーション (T={T} K, B={B_ext} T)')
     plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
-    plt.xlim(min(freq_thz), max(freq_thz))
+    plt.xlim(min(freq_thz*1e-12), max(freq_thz*1e-12))
     plt.savefig('ggg_transmission_spectrum.png', dpi=300)
     plt.tight_layout()
     
