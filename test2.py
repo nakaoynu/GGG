@@ -50,7 +50,7 @@ def get_hamiltonian(B_ext_z, s, g_factor, kB, muB, B4, B6):
 
 def calculate_susceptibility_tensor(omega, H, T, S_ops, N_spin, g_factor, muB, kB, hbar, gamma):
     """
-    【新しい関数】磁気感受率テンソル chi_ij を計算する
+    磁気感受率テンソル chi_ij を計算する
     """
     eigenvalues, eigenvectors = np.linalg.eigh(H)
     eigenvalues -= np.min(eigenvalues)
@@ -78,9 +78,9 @@ def calculate_susceptibility_tensor(omega, H, T, S_ops, N_spin, g_factor, muB, k
                     # 遷移要素の積 <n|Si|m> * <m|Sj|n> = <n|Si|m> * (<n|Sj|m>)*
                     transition_term = S_eig_basis[i][n, m] * np.conj(S_eig_basis[j][n, m])
                     chi_tensor[i, j] += pop_diff * transition_term / denominator
-    
-    prefactor = N_spin * (g_factor * muB)**2 / hbar
-    return prefactor * chi_tensor
+
+    G0 = N_spin * (g_factor * muB)**2 / (2 * hbar)
+    return G0 * chi_tensor
 
 def calculate_transmittance(omega, chi, eps_bg, d, c):
     # (変更なし)
@@ -96,7 +96,7 @@ def calculate_transmittance(omega, chi, eps_bg, d, c):
 def main():
     # パラメータ設定 (変更なし)
     kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458
-    g_factor = 1.95; eps_bg = 14.44; s = 3.5; N_spin = 1.26e28; d = 0.1578e-3; gamma = 5.0e11
+    g_factor = 1.95; eps_bg = 14.44; s = 3.5; N_spin = 24/1.238 * 1e27; d = 0.1578e-3; gamma = 11e11
     B4 = (0.8 / 240) * 0.606; B6 = (0.04 / 5040) * -1.513
     T_array = [35, 50, 75, 95, 200, 250]; B_ext = 7.8
     

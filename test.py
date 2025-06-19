@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.signal import find_peaks
+#from scipy.signal import find_peaks
 
 # 日本語フォントの設定 (ご自身の環境に合わせてフォント名を変更してください)
 # Windows: "Meiryo", "Yu Gothic", "MS Gothic"
@@ -21,9 +21,10 @@ mu0 = 4.0 * np.pi * 1e-7 # 真空の透磁率 [H/m]
 g_factor = 1.95      # g因子
 eps_bg = 14.4       # 背景比誘電率 (論文より)
 s = 3.5              # Gd3+のスピン量子数 (S=7/2)
-N_spin = 1.26e28     # スピン密度 [m^-3] (論文の情報を基に計算・仮定)←確認する必要あり
+N_spin = 24/1.238 * 1e27     # スピン密度 [m^-3] (論文の情報を基に計算・仮定)
 d = 0.1578e-3        # サンプルの厚み [m]
-G0 = mu0 * N_spin * (g_factor * muB)**2 / 2 * hbar # 磁気感受率の単位変換係数 [H/m]
+G0 = mu0 * N_spin * (g_factor * muB)**2 / hbar # 磁気感受率の定数
+print("G0:", G0/1e11)
 
 # 結晶場パラメータ (B_k^q = B_k / f_k)
 # thesis_sakata_latest.pdf の値を参考に調整
@@ -36,7 +37,7 @@ B6 = B6_param * factor_b6 # [K]
 
 # シミュレーション条件
 T = 35.0             # 温度 [K]←条件すり合わせ必要
-B_ext = 7.8          # 外部静磁場 [T]←条件すり合わせ必要
+B_ext = 9.0          # 外部静磁場 [T]←条件すり合わせ必要
 gamma = 1.1e11       # 緩和周波数 [Hz] (Elijahの論文よりスペクトルの線幅を決定)
 
 # --- 2. 演算子の定義 ---
@@ -96,16 +97,20 @@ def calculate_susceptibility(omega, H, T):
     円偏光に対する磁気感受率 chi_R, chi_L を計算する
     式は thesis_sakata_lateset.pdf (Eq. 2-25, 2-26) を参照
     """
-    eigenvalues, eigenvectors = np.linalg.eigh(H)
+    eigenvalues, eigenvectors = np.linalg.eigh(H) # ハミルトニアンの固有値問題を解く
     eigenvalues -= np.min(eigenvalues) # 基底状態をエネルギーのゼロ点に設定
+    #print("Eigenvalues (in J):", eigenvalues)
     
     # 占有確率 P(E_n) = exp(-E_n / kBT) / Z
     Z = np.sum(np.exp(-eigenvalues / (kB * T)))
     populations = np.exp(-eigenvalues / (kB * T)) / Z #P(E_n)
+    #print("Populations:", populations)
     
     # 磁気感受率の計算
     chi = 0.0
-    for i, m in enumerate(np.arange(-s, s, 1)):
+    m_vals = np.arange(-s, s, 1)
+    for i in range(len(eigenvalues)-1):
+        m = m_vals[i]
         delta_E = eigenvalues[i + 1] - eigenvalues[i]
         delta_pop = populations[i + 1] - populations[i]
         omega_0 = delta_E / hbar
@@ -118,7 +123,7 @@ def calculate_transmission(omega, chi):
     # 比透磁率 mu_r = 1 + chi
     # thesis_sakata_lateset.pdf (Eq. 2-1) などを参照
     # B形式ではなくH形式 (mu = 1 + chi) を採用
-    mu_r = 1 + chi
+    mu_r = 1 + chi  
     
     # 複素屈折率 n_complex = sqrt(eps_bg * mu_r)
     n_complex = np.sqrt(eps_bg * mu_r)
@@ -134,30 +139,34 @@ def calculate_transmission(omega, chi):
 # --- 5. メイン実行ブロック ---
 if __name__ == '__main__':
     # シミュレーションの周波数範囲 (THz -> Hz)
-    freq_thz = np.arange(4.0e11, 9.0e11, 0.5e11)  # 4THzから9THzまで
-    # 周波数をラジアン毎秒に変換
+    freq_thz = np.arange(0.1e11, 9.0e11, 0.1e11)  # 0.1THzから9THzまで
+    # 周波数をラジアン毎秒(ω)に変換
     omega_rad_s = freq_thz * 2 * np.pi
 
     # 結果を格納する配列
     trans_R = []  # 右円偏光 (RCP)
+    chi_R = []  # 右円偏光の感受率
 
     # ハミルトニアンを計算 (周波数ループの外で一度だけ計算)
-    H = get_hamiltonian(B_ext)
     Sz = get_spin_operators(s)
-
+    H = get_hamiltonian(B_ext)
+    #print(H)
+    
     # 周波数ごとに計算を実行
     print("シミュレーションを開始します...")
     for i, omega in enumerate(omega_rad_s):
         if (i + 1) % 20 == 0:
             print(f"  ... {i+1}/{len(omega_rad_s)} 完了")
-            
-        chi_R = calculate_susceptibility(omega, H, T)
-
-        T_R = calculate_transmission(omega, chi_R)
-
-        trans_R.append(T_R)
-        print(f"ω = {omega:.2e} rad/s, 透過率 T_R = {T_R:.4f}")
+        # 1. 現在のomegaに対する感受率を計算し、一時変数に格納
+        current_chi_R = calculate_susceptibility(omega, H, T)
+        # 2. 感受率をリストに追加
+        chi_R.append(current_chi_R)
+        # 3. 現在の感受率を用いて透過率を計算
+        current_T_R = calculate_transmission(omega, current_chi_R)
+        # 4. 透過率をリストに追加
+        trans_R.append(current_T_R)
     print("シミュレーション完了。")
+    
     
     # --- 6. グラフ描画 ---
     # 横軸ω，縦軸透過率Tのグラフを描画
@@ -173,4 +182,3 @@ if __name__ == '__main__':
     plt.xlim(min(freq_thz*1e-12), max(freq_thz*1e-12))
     plt.savefig('ggg_transmission_spectrum.png', dpi=300)
     plt.tight_layout()
-    
