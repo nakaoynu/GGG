@@ -40,11 +40,11 @@ $$
 
 
 $$
-\chi_\pm(\omega) \propto \sum_{n, m} \frac{P(E_m) - P(E_n)}{E_n - E_m - \hbar(\omega + i\gamma)} |\langle n| S_\pm |m \rangle|^2
+\chi_{ij}(\omega) \propto \sum_{n, m} \frac{P(E_m) - P(E_n)}{E_n - E_m - \hbar(\omega + i\gamma)} |\langle n| m_i |m \rangle||\langle m| m_j |n \rangle|
 $$ 
 
-ここで, $P_{n}$は,エネルギー${E_{n}}$を持つ準位の占有確率. $| \langle n | S_{\pm} |m \rangle |^2$
- はスピンの上昇/下降演算子$S_{\pm}$による遷移の行列要素です。
+ここで, $P_{n}$は,エネルギー${E_{n}}$を持つ準位の占有確率. $|\langle n| m_i |m \rangle||\langle m| m_j |n \rangle|$
+ は磁気スピン演算子${m_{ij}}$による遷移の行列要素です。
 
 ## セットアップと実行方法
 ### 必要なライブラリ
