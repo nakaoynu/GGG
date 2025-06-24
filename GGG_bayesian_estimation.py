@@ -79,15 +79,16 @@ class PhysicsModelOp(Op):
         output_storage[0][0] = transmittance_array は、「0番目の出力（otypesで定義）に、計算したtransmittance_arrayを格納してください」という意味。この値が、PyMCモデルの次の部分（今回は尤度関数 pm.Normal）へと渡されます。
         """
 
-    def _calculate_susceptibility(self, a):
+    def _calculate_susceptibility(self, a): #引数 a は PyMC から渡されるパラメータ
         # ベクトル化された感受率計算
         delta_E = self.eigenvalues[1:] - self.eigenvalues[:-1]
         delta_pop = self.populations[1:] - self.populations[:-1]
         omega_0 = delta_E / hbar
-        m_vals = np.arange(s, -s - 1, -1)
-        transition_strength = (s + m_vals[:-1]) * (s - m_vals[:-1] + 1)
+        m_vals = np.arange(s, -s, -1)
+        transition_strength = (s + m_vals) * (s - m_vals + 1)
         
-        numerator = self.G0 * delta_pop * transition_strength
+        # ここで'a'を使って感受率を計算
+        numerator = a * self.G0 * delta_pop * transition_strength
         denominator = (omega_0[:, np.newaxis] - self.omega_array) - (1j * gamma) 
         """
                 #omega_0 は遷移周波数（配列）で、[:, np.newaxis] により縦ベクトル（列ベクトル）に変換されます。
@@ -98,31 +99,43 @@ class PhysicsModelOp(Op):
         return chi_array
 
     def _calculate_transmission(self, chi_array):
-        """
-        感受率から透過率を計算する
-        ★★★ 比透磁率を mu_r = 1 + a * chi に変更 ★★★
-        """
-        mu_r = 1 + a * chi_array
+        #感受率から透過率を計算する
+        mu_r = 1 + chi_array
         
         n_complex = np.sqrt(eps_bg * mu_r + 0j)
         impe = np.sqrt(mu_r / eps_bg + 0j)
-        lambda_0 = np.divide(2 * np.pi * c, self.omega_array, where=self.omega_array!=0, out=np.inf)
+
+        # ゼロ割を安全に回避
+        omega_array = self.omega_array
+        lambda_0 = np.full_like(omega_array, np.inf, dtype=float) # omega_arrayと同じ形状の配列を作成し、初期値は無限大
+        nonzero_mask = omega_array != 0
+        lambda_0[nonzero_mask] = (2 * np.pi * c) / omega_array[nonzero_mask]        
         delta = 2 * np.pi * n_complex * d / lambda_0
         numerator = 4 * impe * np.exp(1j * delta) / (1 + impe)**2  
         denominator = 1 + ((impe - 1) / (impe + 1))**2 * np.exp(2j * delta)
-        t = np.divide(numerator, denominator, where=denominator!=0, out=0j)
+        t = np.divide(numerator, denominator, where=denominator!=0, out=np.zeros_like(denominator, dtype=complex))
         return np.abs(t)**2
 
 # --- 2. データの読み込みと準備 ---
 print("実験データを読み込みます...")
+file_path = "Circular_Polarization_B_Field.xlsx"
+sheet_name = "Sheet2"
+# pandasを使ってExcelファイルからデータを読み込む
 # ファイル名を適宜確認・変更してください
 try:
-    df = pd.read_csv("Circular_Polarization_B_Field.xlsx - Sheet2.csv")
+    df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, names=['Frequency (THz)', 'Transmittance'])
     # A列とB列をそれぞれx, yとして読み込む
-    exp_freq_thz = df.iloc[1:, 0].values
-    exp_transmittance = df.iloc[1:, 1].values
+   #exp_freq_thz = df.iloc[1:, 0].values
+   #exp_transmittance = df.iloc[1:, 1].values
+    exp_freq_thz = df['Frequency (THz)'].to_numpy(dtype=float)
+    exp_transmittance = df['Transmittance'].to_numpy(dtype=float)
+    print(f"データの読み込みに成功しました。読み込み件数: {len(df)}件")
 except FileNotFoundError:
-    print("エラー: 'Circular_Polarization_B_Field.xlsx - Sheet2.csv' が見つかりません。")
+    print(f"エラー: ファイルが見つかりません。パスを確認してください。\nパス: {file_path}")
+    exit()
+except Exception as e:
+    # その他のエラー（例：シート名が違うなど）もキャッチ
+    print(f"データの読み込み中にエラーが発生しました: {e}")
     exit()
 
 # データ単位をシミュレーションの単位に合わせる (THz -> rad/s)
@@ -169,15 +182,16 @@ plt.savefig('posterior_dist.png')
 # 2. 実験データとモデルの予測の比較
 fig, ax = plt.subplots(figsize=(10, 6))
 # 事後予測プロット (PPC)
-az.plot_hdi(exp_freq_thz, ppc.posterior_predictive['Y_obs'], ax=ax, color='lightgray', hdi_prob=0.95, label='95% HDI')
-az.plot_hdi(exp_freq_thz, ppc.posterior_predictive['Y_obs'], ax=ax, color='darkgray', hdi_prob=0.50, label='50% HDI')
+az.plot_hdi(exp_freq_thz, ppc.posterior_predictive['Y_obs'], ax=ax, color='lightgray', hdi_prob=0.95)
+az.plot_hdi(exp_freq_thz, ppc.posterior_predictive['Y_obs'], ax=ax, color='darkgray', hdi_prob=0.50)
 
 # 実験データ
 ax.plot(exp_freq_thz, exp_transmittance, 'o', color='red', markersize=4, label='実験データ')
 
 # 事後分布の平均値を使ったベストフィット曲線
 a_mean = trace.posterior['a'].mean().item()
-best_fit_transmittance = physics_model.perform(None, [a_mean], [np.empty_like(exp_transmittance)])[0]
+best_fit_chi = physics_model._calculate_susceptibility(a_mean)
+best_fit_transmittance = physics_model._calculate_transmission(best_fit_chi)
 ax.plot(exp_freq_thz, best_fit_transmittance, color='blue', lw=2, label=f'ベストフィット (a={a_mean:.3f})')
 
 ax.set_xlabel('周波数 (THz)')
@@ -185,6 +199,5 @@ ax.set_ylabel('透過率 (任意単位)')
 ax.set_title('ベイズ推定によるモデルフィッティング結果')
 ax.legend()
 ax.grid(True)
+plt.tight_layout()
 plt.savefig('fitting_result.png')
-plt.show()
-plt.close()
