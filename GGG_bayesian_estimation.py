@@ -84,7 +84,7 @@ class PhysicsModelOp(Op):
         delta_E = self.eigenvalues[1:] - self.eigenvalues[:-1]
         delta_pop = self.populations[1:] - self.populations[:-1]
         omega_0 = delta_E / hbar
-        m_vals = np.arange(s, -s, -1)
+        m_vals = np.arange(s, -s, -1) # m = [s, s-1, ..., -s+1] 
         transition_strength = (s + m_vals) * (s - m_vals + 1)
         
         # ここで'a'を使って感受率を計算

@@ -82,7 +82,7 @@ c = 299792458  # 光速 [m/s]
 kB = 1.381e-23  # ボルツマン定数 [J/K]
 muB = 9.274e-24  # ボーア磁子 [J/T]
 hbar = 1.055e-34  # ディラック定数 [J・s]
-T_array = [35, 50, 75, 95, 200, 250]  # 温度 [K]
+T_array = [35]  # 温度 [K]
 B_array = [0.0, 7.8]  # 磁場 [T]
 g0_const = 6.0e11  
 gamma = 2.5e11  # 緩和 [Hz]
@@ -90,7 +90,7 @@ d = 0.1578e-3  # サンプルの厚み [m]
 
 # ω配列と値の初期化
 omega_array = []
-value_vector = [[] for _ in range(6)]
+value_vector = [[] for _ in range(len(T_array))]  # 各温度に対する値のリスト
 
 # ポピュレーション関数
 def Pm(Em, Z, T):
@@ -111,14 +111,15 @@ for i, T in enumerate(T_array):
 
         chi = 0.0
         s = 3.5
-
+        """
         for num, m in enumerate(np.arange(-3.5, 4.0, 1.0)):
             if num + 1 < len(eigenvalues):
                 delta_E = eigenvalues[num + 1] - eigenvalues[num]
                 omega_0 = delta_E / hbar
                 chi +=  (4 * g0**2 / (2 * np.pi* 2.5e11) * (s + m) * (s - m + 1) * (Pm(eigenvalues[num + 1], Z, T) - Pm(eigenvalues[num], Z, T))
                             / ((omega_0) - omega - (1j * gamma / 2)))
-        chi = -chi     
+        """
+        chi = -chi
         mu = 1 + chi
         n = np.sqrt(eps_BG * mu)
         impe = np.sqrt(mu / eps_BG)
@@ -137,15 +138,17 @@ for i, T in enumerate(T_array):
 
         eigenvalues, eigenvectors = np.linalg.eigh(H)
         Z = np.sum(np.exp(-eigenvalues / (kB * T)))
+        print(eigenvalues)
 
         chi = 0.0
         for num, m in enumerate(np.arange(-3.5, 4.0, 1.0)):
             if num + 1 < len(eigenvalues):
                 delta_E = eigenvalues[num + 1] - eigenvalues[num]
                 omega_0 = delta_E / hbar
-                chi +=  (4 * g0**2 / (2 * np.pi * 2.5e11) * (s + m) * (s - m + 1) * (Pm(eigenvalues[num + 1], Z, T) - Pm(eigenvalues[num], Z, T))
+                delta_pop = Pm(eigenvalues[num + 1], Z, T) - Pm(eigenvalues[num], Z, T)
+                chi +=  (4 * g0**2 / (2 * np.pi * 2.5e11) * (s + m) * (s - m + 1) * delta_pop
                             / ((omega_0) - omega - (1j * gamma / 2)))
-        chi = -chi        
+        chi = -chi
         mu = 1 + chi
         n = np.sqrt(eps_BG * mu)
         impe = np.sqrt(mu / eps_BG)
@@ -154,6 +157,7 @@ for i, T in enumerate(T_array):
 
         t = np.exp(delta * 1j ) * 4 * impe / (1 + impe)**2
         y = abs(t - t_BG)**2
+        #y = abs(t)**2
         value_array.append(y)
 
         if i == 0:
@@ -175,9 +179,9 @@ for i, values in enumerate(value_vector):
     # ピークをプロット
     plt.scatter(peak_frequencies, peak_values, color='red')
 
-#plt.title(f"B={B_array[1]} T (H)")
-plt.xlabel("周波数 (THz)")
-plt.ylabel("$|t-t_{BG}|^2$")
-plt.legend()
-plt.show()
 
+plt.title(f"B={B_array[1]}(T) T={T_array[i]} (K)の透過率スペクトル")
+plt.xlabel("周波数 (THz)")
+plt.ylabel("$|t - t_{BG}|^2$")
+plt.legend()
+plt.savefig('test_sakata.png', dpi=300)
