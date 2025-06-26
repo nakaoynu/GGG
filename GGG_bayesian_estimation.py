@@ -42,11 +42,11 @@ def get_hamiltonian():
 # 物理モデルをカプセル化するクラス (PyMC <-> NumPyの橋渡し)
 class PhysicsModelOp(Op):
     # PyMCへの入力と出力の型を定義
-    itypes = [pt.dscalar]  # 入力: a (スカラー)
-    otypes = [pt.dvector] # 出力: 透過率スペクトル (ベクトル)
+    itypes = [pt.dscalar]  # Input Types（入力）: a (スカラー)
+    otypes = [pt.dvector] # Output Types（出力）: 透過率スペクトル (ベクトル)
 
     def __init__(self, omega_array, H_matrix, T_val): # 物理モデルの初期化（メソッド, PhysicsModelOpのインスタンスが作成されるときに1度だけ呼ばれる）
-        self.omega_array = omega_array
+        self.omega_array = omega_array # selfの属性として, omega_arrayを記憶させる
         self.H_matrix = H_matrix
         self.T = T_val
 
@@ -62,22 +62,6 @@ class PhysicsModelOp(Op):
         N_spin_exp = 24/1.238 * 1e27
         N_spin = N_spin_exp * 10
         self.G0 = mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
-
-
-    def perform(self, node, inputs, output_storage):
-        # PyMCから渡されたパラメータ`a`
-        a, = inputs # inputsリストから最初の値を取得
-        
-        # 物理計算の実行
-        chi_array = self._calculate_susceptibility(a)
-        transmittance_array = self._calculate_transmission(chi_array)
-        
-        # 計算結果をPyMCに返す
-        output_storage[0][0] = transmittance_array
-        """
-        output_storage: 計算結果をPyMCの世界に返すための場所。
-        output_storage[0][0] = transmittance_array は、「0番目の出力（otypesで定義）に、計算したtransmittance_arrayを格納してください」という意味。この値が、PyMCモデルの次の部分（今回は尤度関数 pm.Normal）へと渡されます。
-        """
 
     def _calculate_susceptibility(self, a): #引数 a は PyMC から渡されるパラメータ
         # ベクトル化された感受率計算
@@ -115,89 +99,147 @@ class PhysicsModelOp(Op):
         denominator = 1 + ((impe - 1) / (impe + 1))**2 * np.exp(2j * delta)
         t = np.divide(numerator, denominator, where=denominator!=0, out=np.zeros_like(denominator, dtype=complex))
         return np.abs(t)**2
-
-# --- 2. データの読み込みと準備 ---
-print("実験データを読み込みます...")
-file_path = "Circular_Polarization_B_Field.xlsx"
-sheet_name = "Sheet2"
-# pandasを使ってExcelファイルからデータを読み込む
-# ファイル名を適宜確認・変更してください
-try:
-    df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, names=['Frequency (THz)', 'Transmittance'])
-    # A列とB列をそれぞれx, yとして読み込む
-   #exp_freq_thz = df.iloc[1:, 0].values
-   #exp_transmittance = df.iloc[1:, 1].values
-    exp_freq_thz = df['Frequency (THz)'].to_numpy(dtype=float)
-    exp_transmittance = df['Transmittance'].to_numpy(dtype=float)
-    print(f"データの読み込みに成功しました。読み込み件数: {len(df)}件")
-except FileNotFoundError:
-    print(f"エラー: ファイルが見つかりません。パスを確認してください。\nパス: {file_path}")
-    exit()
-except Exception as e:
-    # その他のエラー（例：シート名が違うなど）もキャッチ
-    print(f"データの読み込み中にエラーが発生しました: {e}")
-    exit()
-
-# データ単位をシミュレーションの単位に合わせる (THz -> rad/s)
-exp_omega = exp_freq_thz * 1e12 * 2 * np.pi
-
-# --- 3. PyMCモデルの構築 ---
-print("PyMCモデルを構築します...")
-# 物理モデルのインスタンスを作成
-H = get_hamiltonian()
-physics_model = PhysicsModelOp(exp_omega, H, T)
-
-with pm.Model() as model:
-    # --- 事前分布 (Priors) ---
-    # a: 0から1の範囲の正規分布。平均0.5,標準偏差0.25で緩やかに設定
-    a = pm.TruncatedNormal('a', mu=0.5, sigma=0.25, lower=0.0, upper=1.0)
     
-    # sigma: 測定誤差の標準偏差。幅広い値を取りうるHalfCauchy分布を仮定
-    sigma = pm.HalfCauchy('sigma', beta=1.0)
+    def perform(self, node, inputs, output_storage):
+        # PyMCから渡されたパラメータ`a`
+        a, = inputs # inputsリストから最初の値を取得
+        
+        # 物理計算の実行
+        chi_array = self._calculate_susceptibility(a)
+        transmittance_array = self._calculate_transmission(chi_array)
+        
+        # 計算結果をPyMCに返す
+        output_storage[0][0] = transmittance_array
+        """
+        output_storage: 計算結果をPyMCの世界に返すための場所。
+        output_storage[0][0] = transmittance_array は、「0番目の出力（otypesで定義）に、計算したtransmittance_arrayを格納してください」という意味。この値が、PyMCモデルの次の部分（今回は尤度関数 pm.Normal）へと渡されます。
+        """
+if __name__ == '__main__':
+    # --- 2. データの読み込みと準備 ---
+    print("実験データを読み込みます...")
+    file_path = "Circular_Polarization_B_Field.xlsx"
+    sheet_name = "Sheet2"
+    # pandasを使ってExcelファイルからデータを読み込む
+    try:
+        df = pd.read_excel(file_path, sheet_name=sheet_name, header=0, names=['Frequency (THz)', 'Transmittance'])
+        # A列とB列をそれぞれx, yとして読み込む
+    #exp_freq_thz = df.iloc[1:, 0].values
+    #exp_transmittance = df.iloc[1:, 1].values
+        exp_freq_thz = df['Frequency (THz)'].to_numpy(dtype=float)
+        exp_transmittance = df['Transmittance'].to_numpy(dtype=float)
+        print(f"データの読み込みに成功しました。読み込み件数: {len(df)}件")
+    except FileNotFoundError:
+        print(f"エラー: ファイルが見つかりません。パスを確認してください。\nパス: {file_path}")
+        exit()
+    except Exception as e:
+        # その他のエラー（例：シート名が違うなど）もキャッチ
+        print(f"データの読み込み中にエラーが発生しました: {e}")
+        exit()
 
-    # --- 物理モデルとの連携 ---
-    # `a`を物理モデルに入力し、理論的な透過率`mu`を計算
-    mu = physics_model(a)
+    # データ単位をシミュレーションの単位に合わせる (THz -> rad/s)
+    exp_omega = exp_freq_thz * 1e12 * 2 * np.pi
 
-    # --- 尤度 (Likelihood) ---
-    # モデルの予測値(mu)と実験データ(exp_transmittance)を正規分布で結びつける
-    # 測定誤差はsigmaに従うと仮定
-    Y_obs = pm.Normal('Y_obs', mu=mu, sigma=sigma, observed=exp_transmittance)
+    # --- 3. PyMCモデルの構築 ---
+    print("PyMCモデルを構築します...")
+    # 物理モデルのインスタンスを作成
+    H = get_hamiltonian()
+    physics_model = PhysicsModelOp(exp_omega, H, T)
 
-# --- 4. MCMCサンプリングの実行 ---
-print("MCMCサンプリングを開始します... (時間がかかる場合があります)")
-with model:
-    # NUTSサンプラーを用いて事後分布からサンプリング
-    trace = pm.sample(2000, tune=1000, chains=2, cores=1)
-    # 事後予測サンプリング
-    ppc = pm.sample_posterior_predictive(trace)
-print("サンプリング完了。")
+    with pm.Model() as model:
+        # --- 事前分布 (Priors) ---
+        # a: 0から1の範囲のβ分布。両端にピークが現れる。
+        a = pm.Beta('a', alpha=0.1, beta=0.1)
+        
+        # sigma: 測定誤差の標準偏差。幅広い値を取りうるHalfCauchy分布を仮定
+        sigma = pm.HalfCauchy('sigma', beta=1.0)
 
-# --- 5. 結果の可視化と評価 ---
-print("結果をプロットします...")
-# 1. パラメータ`a`の事後分布
-az.plot_posterior(trace, var_names=['a', 'sigma'])
-plt.savefig('posterior_dist.png')
+        # --- 物理モデルとの連携 ---
+        # `a`を物理モデルに入力し、理論的な透過率`mu`を計算
+        mu = physics_model(a)
 
-# 2. 実験データとモデルの予測の比較
-fig, ax = plt.subplots(figsize=(10, 6))
-# 事後予測プロット (PPC)
-az.plot_hdi(exp_freq_thz, ppc.posterior_predictive['Y_obs'], ax=ax, color='lightgray', hdi_prob=0.95)
-az.plot_hdi(exp_freq_thz, ppc.posterior_predictive['Y_obs'], ax=ax, color='darkgray', hdi_prob=0.50)
+        # --- 尤度 (Likelihood) ---
+        # モデルの予測値(mu)と実験データ(exp_transmittance)を正規分布で結びつける
+        # 測定誤差はsigmaに従うと仮定
+        Y_obs = pm.Normal('Y_obs', mu=mu, sigma=sigma, observed=exp_transmittance)
 
-# 実験データ
-ax.plot(exp_freq_thz, exp_transmittance, 'o', color='red', markersize=4, label='実験データ')
+    # --- 4. MCMCサンプリングの実行 ---
+    print("MCMCサンプリングを開始します... (時間がかかる場合があります)")
+    with model:
+        # NUTSサンプラーを用いて事後分布からサンプリング
+        trace = pm.sample(2000, tune=1000, chains=4, cores=4, random_seed=42)
+        # 事後予測サンプリング
+        ppc = pm.sample_posterior_predictive(trace, random_seed=42)
+    print("サンプリング完了。")
+    az.summary(trace, var_names=['a', 'sigma'])
 
-# 事後分布の平均値を使ったベストフィット曲線
-a_mean = trace.posterior['a'].mean().item()
-best_fit_chi = physics_model._calculate_susceptibility(a_mean)
-best_fit_transmittance = physics_model._calculate_transmission(best_fit_chi)
-ax.plot(exp_freq_thz, best_fit_transmittance, color='blue', lw=2, label=f'ベストフィット (a={a_mean:.3f})')
+    # --- 6. 結果の可視化と評価 ---
+    print("結果をプロットします...")
 
-ax.set_xlabel('周波数 (THz)')
-ax.set_ylabel('透過率 (任意単位)')
-ax.set_title('ベイズ推定によるモデルフィッティング結果')
-ax.legend()
-ax.grid(True)
-plt.tight_layout()
-plt.savefig('fitting_result.png')
+    # --------------------------------------------------------------------
+    # プロット1: パラメータの事後分布とトレースプロット
+    # --------------------------------------------------------------------
+    try:
+        print("トレースプロットを生成します...")
+        
+        # az.plot_traceはAxesの配列を返す
+        axes = az.plot_trace(trace, var_names=['a', 'sigma'], figsize=(10, 7))
+        
+        # Axes配列からFigureオブジェクトを取得する
+        fig = axes.ravel()[0].figure
+        
+        # Figureオブジェクトに対してタイトルを設定
+        fig.suptitle('パラメータ事後分布とサンプリングのトレース', fontsize=16)
+        
+        # レイアウトを自動調整
+        fig.tight_layout()
+        # ファイルに保存
+        plt.savefig('trace_plot.png', dpi=300)
+        print("✅ 'trace_plot.png' を保存しました。")
+
+    except Exception as e:
+        print(f"❌ トレースプロットの生成中にエラーが発生しました: {e}")
+    finally:
+        # メモリ解放のため、現在の図を閉じる
+        plt.close('all')
+
+
+    # --------------------------------------------------------------------
+    # プロット2: 実験データとモデルの予測の比較
+    # --------------------------------------------------------------------
+    try:
+        print("フィッティング結果のグラフを生成します...")
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        # 事後予測プロット (モデルの不確実性を示す灰色の帯)
+        az.plot_hdi(exp_freq_thz, ppc.posterior_predictive['Y_obs'], ax=ax, color='lightgray', hdi_prob=0.95)
+        az.plot_hdi(exp_freq_thz, ppc.posterior_predictive['Y_obs'], ax=ax, color='darkgray', hdi_prob=0.50)
+
+        # 実験データ
+        ax.plot(exp_freq_thz, exp_transmittance, 'o', color='red', markersize=4, label='実験データ')
+
+        # 事後分布の平均値を使ったベストフィット曲線
+        a_mean = trace.posterior['a'].mean().item()
+        best_fit_chi = physics_model._calculate_susceptibility(a_mean)
+        best_fit_transmittance = physics_model._calculate_transmission(best_fit_chi)
+        ax.plot(exp_freq_thz, best_fit_transmittance, color='blue', lw=2, label=f'ベストフィット (a={a_mean:.3f})')
+
+        # ★★★ ここを追加: HDIの凡例をダミーの線で作成 ★★★
+        ax.plot([], [], lw=8, color='lightgray', label='95% HDI')
+        ax.plot([], [], lw=8, color='darkgray', label='50% HDI')
+        
+        # グラフの装飾
+        ax.set_xlabel('周波数 (THz)', fontsize=12)
+        ax.set_ylabel('透過率', fontsize=12)
+        ax.set_title('ベイズ推定によるモデルフィッティング結果', fontsize=16)
+        ax.legend()
+        ax.grid(True, linestyle='--', alpha=0.6)
+
+        # ファイルに保存
+        plt.savefig('fitting_result.png', dpi=300)
+        print("✅ 'fitting_result.png' を保存しました。")
+
+    except Exception as e:
+        print(f"❌ フィッティング結果のプロット中にエラーが発生しました: {e}")
+    finally:
+        # メモリ解放のため、現在の図を閉じる
+        plt.close('all')
