@@ -29,7 +29,7 @@ gamma = 110e9
 def get_hamiltonian():
     Sz = np.diag(np.arange(s, -s - 1, -1))
     B4_param = 0.8 / 240; B6_param = 0.04 / 5040
-    factor_b4 = 0.606; factor_b6 = -1.513
+    factor_b4 = 0.606; factor_b6 = -1.513 #ベイズ推定候補, なぜこのファクターになるのか要確認
     B4 = B4_param * factor_b4; B6 = B6_param * factor_b6
     O04 = 60 * np.diag([7, -13, -3, 9, 9, -3, -13, 7])
     X_O44 = np.zeros((8, 8)); X_O44[3, 7], X_O44[4, 0] = np.sqrt(35), np.sqrt(35); X_O44[2, 6], X_O44[5, 1] = 5*np.sqrt(3), 5*np.sqrt(3); O44 = 12 * (X_O44 + X_O44.T)
@@ -60,7 +60,7 @@ class PhysicsModelOp(Op):
         # 磁気感受率の定数部分
         mu0 = 4.0 * np.pi * 1e-7
         N_spin_exp = 24/1.238 * 1e27
-        N_spin = N_spin_exp * 10
+        N_spin = N_spin_exp * 10 #ベイズ推定候補
         self.G0 = mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
 
     def _calculate_susceptibility(self, a): #引数 a は PyMC から渡されるパラメータ
@@ -84,10 +84,12 @@ class PhysicsModelOp(Op):
 
     def _calculate_transmission(self, chi_array):
         #感受率から透過率を計算する
-        mu_r = 1 + chi_array
+        mu_r = 1/ (1 - chi_array)
         
         n_complex = np.sqrt(eps_bg * mu_r + 0j)
+        n_complex_bg = np.sqrt(eps_bg * 1 + 0j)
         impe = np.sqrt(mu_r / eps_bg + 0j)
+        impe_bg = np.sqrt(1 / eps_bg + 0j) 
 
         # ゼロ割を安全に回避
         omega_array = self.omega_array
@@ -95,10 +97,14 @@ class PhysicsModelOp(Op):
         nonzero_mask = omega_array != 0
         lambda_0[nonzero_mask] = (2 * np.pi * c) / omega_array[nonzero_mask]        
         delta = 2 * np.pi * n_complex * d / lambda_0
-        numerator = 4 * impe * np.exp(1j * delta) / (1 + impe)**2  
+        delta_bg = 2 * np.pi * n_complex_bg * d / lambda_0
+        numerator = 4 * impe * np.exp(1j * delta) / (1 + impe)**2
+        numerator_bg =  4 * impe_bg * np.exp(1j * delta_bg) / (1 + impe_bg)**2
         denominator = 1 + ((impe - 1) / (impe + 1))**2 * np.exp(2j * delta)
-        t = np.divide(numerator, denominator, where=denominator!=0, out=np.zeros_like(denominator, dtype=complex))
-        return np.abs(t)**2
+        denominator_bg = 1 + ((impe_bg - 1) / (impe_bg + 1))**2 * np.exp(2j * delta_bg)
+        t = np.divide(numerator, denominator, where=denominator!=0, out=np.zeros_like(denominator, dtype=complex)) 
+        t_bg = np.divide(numerator_bg, denominator_bg, where=denominator!=0, out=np.zeros_like(denominator, dtype=complex)) 
+        return  np.abs( t - t_bg )**2
     
     def perform(self, node, inputs, output_storage):
         # PyMCから渡されたパラメータ`a`
@@ -147,8 +153,8 @@ if __name__ == '__main__':
 
     with pm.Model() as model:
         # --- 事前分布 (Priors) ---
-        # a: 0から1の範囲のβ分布。両端にピークが現れる。
-        a = pm.Beta('a', alpha=0.1, beta=0.1)
+        # a: 無情報な一様分布
+        a = pm.Beta('a', alpha=1.0, beta=1.0)
         
         # sigma: 測定誤差の標準偏差。幅広い値を取りうるHalfCauchy分布を仮定
         sigma = pm.HalfCauchy('sigma', beta=1.0)
@@ -170,7 +176,7 @@ if __name__ == '__main__':
         # 事後予測サンプリング
         ppc = pm.sample_posterior_predictive(trace, random_seed=42)
     print("サンプリング完了。")
-    az.summary(trace, var_names=['a', 'sigma'])
+    print(az.summary(trace, var_names=['a', 'sigma']))
 
     # --- 6. 結果の可視化と評価 ---
     print("結果をプロットします...")
@@ -193,8 +199,8 @@ if __name__ == '__main__':
         # レイアウトを自動調整
         fig.tight_layout()
         # ファイルに保存
-        plt.savefig('trace_plot.png', dpi=300)
-        print("✅ 'trace_plot.png' を保存しました。")
+        plt.savefig('B_trace_plot.png', dpi=300)
+        print("✅ 'B_trace_plot.png' を保存しました。")
 
     except Exception as e:
         print(f"❌ トレースプロットの生成中にエラーが発生しました: {e}")
@@ -233,10 +239,11 @@ if __name__ == '__main__':
         ax.set_title('ベイズ推定によるモデルフィッティング結果', fontsize=16)
         ax.legend()
         ax.grid(True, linestyle='--', alpha=0.6)
+        ax.set_ylim(bottom=0)
 
         # ファイルに保存
-        plt.savefig('fitting_result.png', dpi=300)
-        print("✅ 'fitting_result.png' を保存しました。")
+        plt.savefig('B_fitting_result.png', dpi=300)
+        print("✅ 'B_fitting_result.png' を保存しました。")
 
     except Exception as e:
         print(f"❌ フィッティング結果のプロット中にエラーが発生しました: {e}")

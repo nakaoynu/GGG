@@ -37,8 +37,7 @@ def get_hamiltonian(B_ext_z):
     H_zee = g_factor * muB * B_ext_z * Sz
     return H_cf + H_zee
 
-# --- 2. 2種類の計算方法をそれぞれ関数として定義 (変更なし) ---
-# (省略... 前回のコードと同じ)
+# --- 2. 2種類の計算方法をそれぞれ関数として定義  ---
 def calculate_chi_loop(omega_array, H, T):
     print("方法A: forループによる計算を開始...")
     chi_R_list = []
@@ -104,7 +103,6 @@ if __name__ == '__main__':
         difference = np.abs(chi_R_np - chi_array_from_vector)
         print(f"   最大差分: {np.max(difference)}")
 
-    # --- ★★★【ここからが追加部分】★★★ ---
     # 4.5. 結果をCSVファイルに保存
     print("\n結果をCSVファイルに保存します...")
     try:
@@ -130,12 +128,10 @@ if __name__ == '__main__':
 
     except Exception as e:
         print(f"❌ CSVファイルの保存中にエラーが発生しました: {e}")
-    # --- ★★★【ここまでが追加部分】★★★ ---
 
-    # --- 5. グラフで視覚的に比較 (変更なし) ---
+    # --- 5. グラフで視覚的に比較  ---
     print("\nグラフを生成して視覚的に比較します...")
     fig, axs = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-    # (省略... 前回のコードと同じ)
     fig.suptitle('2つの計算方法による磁気感受率の比較', fontsize=16)
     axs[0].plot(freq_thz, chi_R_np.real, label='方法A (ループ)', linestyle='-')
     axs[0].plot(freq_thz, chi_array_from_vector.real, label='方法B (ベクトル化)', linestyle='--')
