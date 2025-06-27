@@ -65,7 +65,7 @@ pip(conda) install numpy matplotlib scipy
 主要なシミュレーションは以下のスクリプトで実行します。
 
 ```python 
-circular_polarization_simulation.py
+python GGG_model_comparision.py
 ```
 
 シミュレーションのパラメータ（温度 $T$, 外部磁場 $B_{ext}$ など）は、スクリプト内の物理定数とシミュレーションパラメータセクションで直接編集できます。
