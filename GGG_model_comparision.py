@@ -12,7 +12,7 @@ plt.rcParams['figure.dpi'] = 100
 
 # --- 1. 物理定数とパラメータ定義 ---
 kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458
-g_factor = 1.95; eps_bg = 11.5; s = 3.5; d = 0.1578e-3; T = 35.0; B_ext = 7.8
+g_factor = 1.95; eps_bg = 14.45; s = 3.5; T = 35.0; B_ext = 7.8; d = 0.1578e-3 #GGGの厚さ（共振器モードに対応する） 
 B4_param = 0.8 / 240 * 0.606; B6_param = 0.04 / 5040 * -1.513; B4 = B4_param; B6 = B6_param
 mu0 = 4.0 * np.pi * 1e-7; N_spin_exp = 24/1.238 * 1e27; N_spin = N_spin_exp * 10
 G0 = mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
@@ -148,7 +148,7 @@ if __name__ == '__main__':
     plt.savefig('model_comparison.png', dpi=300)
     plt.close()
 
-    # ---【修正案】6. 比較グラフの描画 ---
+    # ---6. 比較グラフの描画 ---
 
     print("\nフィッティング結果をプロットします...")
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -186,14 +186,14 @@ if __name__ == '__main__':
         best_fit_delta_t = best_fit_t_B - physics_model_for_plot.T0
         best_fit_delta_T = np.abs(best_fit_delta_t)**2
         
-        
+        """
         # 差分スペクトルを正規化
         min_val, max_val = np.min(best_fit_delta_T), np.max(best_fit_delta_T)
         if (max_val - min_val) > 1e-9:
             best_fit_prediction = (best_fit_delta_T - min_val) / (max_val - min_val)
         else:
             best_fit_prediction = np.zeros_like(best_fit_delta_T)
-        
+        """
         ax.plot(exp_freq_thz, best_fit_delta_T, color=colors[mt], lw=2, label=f'ベストフィット ({mt})')
 
     # HDIの凡例をダミーの線で作成
