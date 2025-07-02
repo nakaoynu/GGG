@@ -92,7 +92,7 @@ if __name__ == '__main__':
     file_path = "Circular_Polarization_B_Field.xlsx"; sheet_name = 'Sheet2'
     try:
         df = pd.read_excel(file_path, sheet_name=sheet_name, header=0)
-        df_filtered = df[df['Frequency (THz)'] <= 0.3].copy()
+        df_filtered = df[df['Frequency (THz)'] <= 0.376].copy()
         print(f"フィルタリング後のデータ件数: {len(df_filtered)}件")
         exp_freq_thz = df_filtered['Frequency (THz)'].to_numpy(dtype=float)
         exp_transmittance = df_filtered['Transmittance'].to_numpy(dtype=float)
@@ -123,8 +123,8 @@ if __name__ == '__main__':
             
             # サンプリング実行
             traces[mt] = pm.sample(
-                1000, 
-                tune=1000, 
+                2000, 
+                tune=2000, 
                 chains=4, 
                 cores=4,
                 random_seed=42,
