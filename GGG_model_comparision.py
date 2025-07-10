@@ -12,7 +12,10 @@ plt.rcParams['figure.dpi'] = 100
 
 # --- 1. 物理定数とパラメータ定義 ---
 kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458
-g_factor = 1.95; eps_bg = 14.4573436076855250; B_ext = 7.8; T=35.0; d = 0.1578e-3
+"""
+屈折率n = 3.8（背景誘電率eps_bg = n^2 = 14.44）の下で, 高次周波数に基づく膜厚dを手計算した結果
+"""
+g_factor = 1.95; eps_bg = 14.44; B_ext = 7.8; T=35.0; d = 0.150466e-3
 B4_param = 0.8 / 240 * 0.606; B6_param = 0.04 / 5040 * -1.513; B4 = B4_param; B6 = B6_param
 mu0 = 4.0 * np.pi * 1e-7; N_spin_exp = 24/1.238 * 1e27; N_spin = N_spin_exp * 10; s=3.5
 G0 = mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
@@ -95,7 +98,7 @@ if __name__ == '__main__':
         df_filtered = df[df['Frequency (THz)'] <= 0.376].copy()
         print(f"フィルタリング後のデータ件数: {len(df_filtered)}件")
         exp_freq_thz = df_filtered['Frequency (THz)'].to_numpy(dtype=float)
-        exp_transmittance = df_filtered['Transmittance'].to_numpy(dtype=float)
+        exp_transmittance = df_filtered['Transmittance (7.7T)'].to_numpy(dtype=float)
     except Exception as e: print(f"データ読み込み中にエラー: {e}"); exit()
     exp_omega_rad_s = exp_freq_thz * 1e12 * 2 * np.pi
 
@@ -198,7 +201,7 @@ if __name__ == '__main__':
         ax.plot(exp_freq_thz, best_fit_delta_T, color=colors[mt], lw=2, label=f'ベストフィット ({mt})')
 
     # HDIの凡例をダミーの線で作成
-    ax.plot([], [], lw=8, color='lightgray', label='95% HDI (両モデル)')
+    ax.plot([], [], lw=4, color='lightgray', label='95% HDI (両モデル)')
 
     # グラフ装飾
     ax.set_xlabel('周波数 (THz)', fontsize=12)

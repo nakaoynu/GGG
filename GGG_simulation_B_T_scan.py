@@ -8,7 +8,9 @@ plt.rcParams['figure.dpi'] = 100
 
 # --- 1. 物理定数とパラメータ定義 ---
 kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458
-eps_bg = 14.44; s = 3.5; d = 0.150466e-3; g_factor = 1.95
+eps_bg = 14.44; s = 3.5; g_factor = 1.95
+d = 0.150466e-3  # 高次周波数に基づく膜厚(こっちの方が妥当！)
+# d = 0.1578e-3  # Elijahが設計した膜厚
 B4_param = 0.8 / 240 * 0.606; B6_param = 0.04 / 5040 * -1.513; B4 = B4_param; B6 = B6_param
 mu0 = 4.0 * np.pi * 1e-7; N_spin_exp = 24/1.238 * 1e27; N_spin = N_spin_exp * 10
 G0 = mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
@@ -28,7 +30,7 @@ def get_hamiltonian(B_ext_z):
     H_zee = g_factor * muB * B_ext_z * Sz
     return H_cf + H_zee
 
-def calculate_susceptibility(omega_array, H, T, gamma):
+def calculate_susceptibility(omega_array, H, T, gamma, a_param):
     eigenvalues, _ = np.linalg.eigh(H)
     eigenvalues -= np.min(eigenvalues)
     Z = np.sum(np.exp(-eigenvalues / (kB * T)))
@@ -42,7 +44,7 @@ def calculate_susceptibility(omega_array, H, T, gamma):
     numerator = G0 * delta_pop * transition_strength
     denominator = (omega_0[:, np.newaxis] - omega_array) - (1j * gamma)
     chi_array = np.sum(numerator[:, np.newaxis] / denominator, axis=0)
-    return chi_array
+    return -a_param * chi_array
 
 def calculate_transmission_intensity(omega_array, mu_r_array):
     """透過係数tを計算するヘルパー関数"""
@@ -54,28 +56,25 @@ def calculate_transmission_intensity(omega_array, mu_r_array):
     
     r = (impe - 1) / (impe + 1)
     numerator = 4 * impe * np.exp(1j * delta) / (1 + impe)**2
-    denominator = 1 + r**2 * np.exp(2j * delta)
+    denominator = 1 - r**2 * np.exp(2j * delta)
     t = np.divide(numerator, denominator, where=np.abs(denominator)>1e-9, out=np.zeros_like(denominator, dtype=complex))
     return t
 
 def get_delta_T_spectrum(omega_array, T, B, gamma, a_param, model_type):
-    """【改善点】aとgammaを外部から受け取り、計算にそのまま使う"""
+    """aとgammaを外部から受け取り、計算にそのまま使う"""
     H_B = get_hamiltonian(B)
-    chi_B = calculate_susceptibility(omega_array, H_B, T, gamma)
-    
+    chi_B = calculate_susceptibility(omega_array, H_B, T, gamma, a_param)
+
     if model_type == 'H_form':
-        mu_r_B = 1 + a_param * chi_B
+        mu_r_B = 1 + chi_B
     elif model_type == 'B_form':
-        mu_r_B = np.divide(1, 1 - a_param * chi_B, where=(1 - a_param * chi_B)!=0, out=np.ones_like(chi_B, dtype=complex))
+        mu_r_B = np.divide(1, 1 - chi_B, where=(1 - chi_B)!=0, out=np.ones_like(chi_B, dtype=complex))
     else:
         raise ValueError("model_type must be 'H_form' or 'B_form'")
     print(f"計算中: {model_type} モデル, a = {a_param}, gamma = {gamma}, T = {T}, B = {B}")
     T_B = calculate_transmission_intensity(omega_array, mu_r_B)
-    
-    mu_r_0 = np.ones_like(omega_array)
-    T_0 = calculate_transmission_intensity(omega_array, mu_r_0)
 
-    return np.abs(T_B - T_0)**2
+    return np.abs(T_B)**2
 
 # --- 3. メイン実行ブロック ---
 if __name__ == '__main__':
@@ -91,6 +90,10 @@ if __name__ == '__main__':
         exp_transmittance_9 = df['Transmittance (9T)'].to_numpy(dtype=float)
         print(f"データの読み込みに成功しました。読み込み件数: {len(df)}件")
 
+        min_exp_transmittance = np.min(exp_transmittance_7_7)
+        max_exp_transmittance = np.max(exp_transmittance_7_7)
+        exp_transmittance_7_7_normalized = (exp_transmittance_7_7 - min_exp_transmittance) / (max_exp_transmittance - min_exp_transmittance)
+
     except FileNotFoundError:
         print(f"ファイル '{file_path}' が見つかりません。正しいパスを指定してください。")
         exit()
@@ -104,14 +107,16 @@ if __name__ == '__main__':
     print('-' * 30)
 
     # 周波数範囲を定義
-    omega_hz = np.linspace(0.1e12, 1.0e12, 500)
+    omega_hz = np.linspace(0.12e12, 1.0e12, 500)
     omega_rad_s = omega_hz * 2 * np.pi
     freq_thz = omega_hz / 1e12
 
     # モデルごとのパラメータ定義
     params = {
-        'H_form': {'a': 4.10e-02, 'gamma': 9.93e10},
-        'B_form': {'a': 4.40e-02, 'gamma': 8.50e10}
+#        'H_form': {'a': 4.10e-02, 'gamma': 9.93e10},
+        'H_form': {'a': 0, 'gamma': 0.11e12},
+        'B_form': {'a': 0, 'gamma': 0.11e12},
+#        'B_form': {'a': 4.40e-02, 'gamma': 8.50e10}
     }
 
 
@@ -122,7 +127,7 @@ if __name__ == '__main__':
     B_scan_values = [7.7]
     # まず実験データをプロット
     #ax1.plot(exp_freq_thz, exp_transmittance_5, 'o', color='black', markersize=4, label='実験データ (5T)')
-    ax1.plot(exp_freq_thz, exp_transmittance_7_7, 'o', color='black', markersize=4, label='実験データ (7.7T)')
+    ax1.plot(exp_freq_thz, exp_transmittance_7_7_normalized, 'o', color='black', markersize=4, label='正規化された実験データ (7.7T)')
     #ax1.plot(exp_freq_thz, exp_transmittance_9, 'o', color='blue', markersize=4, label='実験データ (9T)')
 
     # 次にシミュレーションデータをプロット
@@ -131,12 +136,21 @@ if __name__ == '__main__':
             a_sim = param['a']
             gamma_sim = param['gamma'] 
             delta_T = get_delta_T_spectrum(omega_rad_s, T_fixed, b_val, gamma_sim, a_sim, model_type=model_type)
-            ax1.plot(freq_thz, delta_T, label=f'B = {b_val:.1f} T, {model_type}')
+
+            min_th = np.min(delta_T)
+            max_th = np.max(delta_T)
+            if(max_th - min_th) > 1e-9:
+                delta_T_normalized = (delta_T - min_th) / (max_th - min_th)
+            else:
+                delta_T_normalized = np.zeros_like(delta_T)
+            ax1.plot(freq_thz, delta_T_normalized, label=f'理論値(B = {b_val:.1f} T, {model_type})')
 
     ax1.set_title(f'差分透過スペクトルの磁場依存性 (T = {T_fixed} K)')
-    ax1.set_xlabel('周波数 (THz)'); ax1.set_ylabel('透過率変化 $T(B) - T(0)$')
-    ax1.legend(); ax1.grid(True)
-    plt.savefig('simulation_B_dependence.png', dpi=300)
+    ax1.set_xlabel('周波数 (THz)')
+    ax1.set_ylabel('透過率 $T(B)$')
+    ax1.legend()
+    ax1.grid(True)
+    plt.savefig('simulation_cavity_mode.png', dpi=300)
 
     """
     # --- 3.2 温度依存性のシミュレーション ---
