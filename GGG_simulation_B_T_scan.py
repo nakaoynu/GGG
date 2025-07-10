@@ -107,15 +107,15 @@ if __name__ == '__main__':
     print('-' * 30)
 
     # 周波数範囲を定義
-    omega_hz = np.linspace(0.12e12, 1.0e12, 500)
+    omega_hz = np.linspace(np.min(exp_freq_thz)*1e12, np.max(exp_freq_thz)*1e12, 500)
     omega_rad_s = omega_hz * 2 * np.pi
     freq_thz = omega_hz / 1e12
 
     # モデルごとのパラメータ定義
     params = {
 #        'H_form': {'a': 4.10e-02, 'gamma': 9.93e10},
-        'H_form': {'a': 0.961, 'gamma': 0.1324771e12},
-        'B_form': {'a': 0.978, 'gamma': 0.2649218e12},
+        'H_form': {'a': 0.1, 'gamma': 0.1324771e12},
+        'B_form': {'a': 0.1, 'gamma': 0.2649218e12},
 #        'B_form': {'a': 4.40e-02, 'gamma': 8.50e10}
     }
 
@@ -123,7 +123,7 @@ if __name__ == '__main__':
     # --- 3.1 磁場依存性のシミュレーション ---
     print(f"磁場依存性を計算・プロットします...")
     fig1, ax1 = plt.subplots(figsize=(10, 6))
-    T_fixed = 35.0
+    T_fixed = 1.0  # 固定温度
     B_scan_values = [7.7]
     # まず実験データをプロット
     #ax1.plot(exp_freq_thz, exp_transmittance_5, 'o', color='black', markersize=4, label='実験データ (5T)')
@@ -150,7 +150,7 @@ if __name__ == '__main__':
     ax1.set_ylabel('透過率 $T(B)$')
     ax1.legend()
     ax1.grid(True)
-    plt.savefig('simulation_cavity_mode.png', dpi=300)
+    plt.savefig('simulation_after_bayesian.png', dpi=300)
 
     """
     # --- 3.2 温度依存性のシミュレーション ---

@@ -36,7 +36,7 @@ def calculate_transmission(omega_array, mu_r_array):
     nonzero_mask = omega_array != 0; lambda_0[nonzero_mask] = (2 * np.pi * c) / omega_array[nonzero_mask]
     delta = 2 * np.pi * n_complex * d / lambda_0
     numerator = 4 * impe * np.exp(1j * delta) / (1 + impe)**2
-    denominator = 1 + ((impe - 1) / (impe + 1))**2 * np.exp(2j * delta)
+    denominator = 1 - ((impe - 1) / (impe + 1))**2 * np.exp(2j * delta)
     t = np.divide(numerator, denominator, where=denominator!=0, out=np.zeros_like(denominator, dtype=complex))
     return t
 
