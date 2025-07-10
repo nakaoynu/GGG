@@ -114,8 +114,8 @@ if __name__ == '__main__':
     # モデルごとのパラメータ定義
     params = {
 #        'H_form': {'a': 4.10e-02, 'gamma': 9.93e10},
-        'H_form': {'a': 0, 'gamma': 0.11e12},
-        'B_form': {'a': 0, 'gamma': 0.11e12},
+        'H_form': {'a': 0.961, 'gamma': 0.1324771e12},
+        'B_form': {'a': 0.978, 'gamma': 0.2649218e12},
 #        'B_form': {'a': 4.40e-02, 'gamma': 8.50e10}
     }
 
