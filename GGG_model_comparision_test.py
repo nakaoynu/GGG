@@ -11,12 +11,16 @@ import japanize_matplotlib # 日本語表示のため
 plt.rcParams['figure.dpi'] = 100
 
 # --- 1. 物理定数とパラメータ定義 ---
-kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458
-eps_bg = 14.44; s = 3.5; g_factor = 1.95
-# 最終的にフィットが良かった膜厚dに更新
-d = 0.150466e-3 
+kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458; mu0 = 4.0 * np.pi * 1e-7
+eps_bg = 14.44; s = 3.5
+"""
+最小二乗誤差和を最小にするパラメータを初期値とする
+"""
+# Elijahの実験値
+d = 157.8e-6
+g_factor = 1.95 
 B4_param = 0.8 / 240 * 0.606; B6_param = 0.04 / 5040 * -1.513; B4 = B4_param; B6 = B6_param
-mu0 = 4.0 * np.pi * 1e-7; N_spin_exp = 24/1.238 * 1e27; N_spin = N_spin_exp * 10
+N_spin = 24/1.238 * 1e27
 G0 = mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
 
 # --- 2. 汎用化された物理モデル関数 ---
@@ -55,10 +59,10 @@ def calculate_transmission_intensity(omega_array, mu_r_array):
     nonzero_mask = omega_array != 0
     lambda_0[nonzero_mask] = (2 * np.pi * c) / omega_array[nonzero_mask]
     delta = 2 * np.pi * n_complex * d / lambda_0
-    r = (impe - 1) / (impe + 1)
-    numerator = 4 * impe * np.exp(1j * delta) / (1 + impe)**2
-    denominator = 1 - r**2 * np.exp(2j * delta)
-    t = np.divide(numerator, denominator, where=np.abs(denominator)>1e-9, out=np.zeros_like(denominator, dtype=complex))
+    # r = (impe - 1) / (impe + 1)
+    numerator = 4 * impe * np.exp(1j * delta) 
+    denominator = ( 1 + impe)**2 - (1 - impe)**2 * np.exp(2j * delta)
+    t = np.divide(numerator, denominator, where=np.abs(denominator)>1e-9, out=np.inf_like(denominator, dtype=complex))
     return np.abs(t)**2
 
 # --- 3. PyMCと連携するためのOpクラス (絶対透過率T(B)を返すように修正) ---
@@ -71,10 +75,10 @@ class PhysicsModelOp(Op):
         self.T = T_val
         self.B = B_val
         self.model_type = model_type
+        # ハミルトニアンはサンプリング中に不変なので、ここで一度だけ計算
         self.H_B = get_hamiltonian(self.B)
-        # ハミルトニアンはBに依存するため、perform内で都度計算
 
-    def perform(self, node, inputs, output_storage):
+    def perform(self, inputs, output_storage):
         a, gamma = inputs
         
         # ハミルトニアンと感受率を計算
@@ -87,7 +91,7 @@ class PhysicsModelOp(Op):
         if self.model_type == 'H_form':
             mu_r_B = 1 + chi_B
         elif self.model_type == 'B_form':
-            mu_r_B = np.divide(1, 1 - chi_B, where=(1 - chi_B)!=0, out=np.ones_like(chi_B, dtype=complex))
+            mu_r_B = np.divide(1, 1 - chi_B, where=(1 - chi_B)!=0, out=np.full_like(chi_B, np.inf, dtype=complex))
         else:
             raise ValueError("Unknown model_type")
             
@@ -124,7 +128,7 @@ if __name__ == '__main__':
         
         with pm.Model() as model:
             # 事前分布
-            a = pm.TruncatedNormal('a', mu=0.5, sigma=0.25, lower=0.0, upper=1.0)
+            a = pm.TruncatedNormal('a', mu=0.1, sigma=0.25, lower=0.0, upper=1.0)
             gamma_param = pm.HalfNormal('gamma', sigma=50e9)
             sigma_obs = pm.HalfCauchy('sigma', beta=1.0)
             
