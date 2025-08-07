@@ -22,12 +22,17 @@ X_O44 = np.zeros((8,8)); X_O44[3,7],X_O44[4,0]=np.sqrt(35),np.sqrt(35); X_O44[2,
 O06 = 1260 * np.diag([1,-5,9,-5,-5,9,-5,1]); X_O46 = np.zeros((8,8)); X_O46[3,7],X_O46[4,0]=3*np.sqrt(35),3*np.sqrt(35); X_O46[2,6],X_O46[5,1]=-7*np.sqrt(3),-7*np.sqrt(3); O46=60*(X_O46+X_O46.T)
 
 # ★★★モデルを調整するためのパラメータ★★★
-d = 0.1578e-3  # Elijahが設計した膜厚
-eps_bg = 14.44 # Elijahが設計した屈折率に基づく背景誘電率(eps_bg = 3.8^2)
+d = 0.1578e-3 * 1.05 # Elijahが設計した膜厚
+eps_bg = 13 # Elijahが設計した屈折率に基づく背景誘電率(eps_bg = 3.8^2)
+gamma0 = np.ones(7) * 0.11e12  # 初期値としてのgamma値（Hz単位）
+gamma_H = gamma0 * np.array([0.9, 0.9, 0.9, 1, 1, 0.9, 0.9])  # H_formのgamma値（遷移依存あり）
+gamma_B = gamma0 * np.array([1, 1, 1, 1, 1, 1, 1])  # B_formのgamma値(遷移依存あり)
+print(f"B形式のgamma値: {gamma_B}")
+print(f"H形式のgamma値: {gamma_H}")
 # モデルごとのパラメータ定義
 params = {
-        'H_form': {'a': 1, 'gamma': 0.0816e12, 'color': 'blue', 'line_style': '--'},
-        'B_form': {'a': 1, 'gamma': 0.0816e12, 'color': 'orange', 'line_style': '-'},
+        'H_form': {'a': 1.5805e+00, 'gamma': gamma_H, 'color': 'blue', 'line_style': '--'},
+        'B_form': {'a': 1.5805e+00, 'gamma': gamma_B, 'color': 'orange', 'line_style': '-'},
         }
 
 # Sz演算子の定義 
@@ -53,7 +58,7 @@ def calculate_susceptibility(omega_array, H, T, gamma, a_param):
     transition_strength = (s + m_vals) * (s - m_vals + 1)
     
     numerator = G0 * delta_pop * transition_strength
-    denominator = (omega_0[:, np.newaxis] - omega_array) - (1j * gamma)
+    denominator = (omega_0[:, np.newaxis] - omega_array) - (1j * gamma[:, np.newaxis])
     chi_array = np.sum(numerator[:, np.newaxis] / denominator, axis=0)
     return -a_param * chi_array
 
@@ -74,15 +79,17 @@ def calculate_transmission_intensity(omega_array, mu_r_array):
 def get_delta_T_spectrum(omega_array, T, B, gamma, a_param, model_type):
     """aとgammaを外部から受け取り、計算にそのまま使う"""
     H_B = get_hamiltonian(B)
-    chi_B = calculate_susceptibility(omega_array, H_B, T, gamma, a_param)
 
     if model_type == 'H_form':
+        chi_B = calculate_susceptibility(omega_array, H_B, T, gamma, a_param)
         mu_r_B = 1 + chi_B
     elif model_type == 'B_form':
+        chi_B = calculate_susceptibility(omega_array, H_B, T, gamma, a_param)
         mu_r_B = np.divide(1, 1 - chi_B, where=(1 - chi_B)!=0, out=np.full_like(chi_B, np.inf, dtype=complex))
     else:
         raise ValueError("model_type must be 'H_form' or 'B_form'")
-    print(f"\n 計算中: {model_type} モデル, a = {a_param}, gamma = {gamma * 1e-9:.2f} GHz, T = {T}, B = {B}, 膜厚d = {d*1e6:.2f} μm, eps_bg = {eps_bg:.3f}")
+    print(f"\n 計算中: {model_type} モデル, a = {a_param}, T = {T}, B = {B}, 膜 厚d = {float(d)*1e6:.2f} μm, eps_bg = {eps_bg:.3f}")
+    # print(gamma_B if model_type == 'B_form' else gamma_H)
     T_B = calculate_transmission_intensity(omega_array, mu_r_B)
 
     return np.abs(T_B)**2
@@ -118,7 +125,7 @@ if __name__ == '__main__':
     print('-' * 30)
 
     # 周波数範囲を定義
-    omega_hz = np.linspace(0.1*1e12, np.max(exp_freq_thz)*1e12, 500)
+    omega_hz = np.linspace((np.min(exp_freq_thz) - 0.03)*1e12, np.max(exp_freq_thz)*1e12, 500)
     omega_rad_s = omega_hz * 2 * np.pi
     freq_thz = omega_hz / 1e12
 
@@ -166,10 +173,7 @@ if __name__ == '__main__':
             for f, t in zip(peak_freq_sim, peak_trans_sim):
                 print(f"  周波数: {f:.4f} THz")
 
-    # print(f"膜厚d = {d*1e6:.2f} μm, gamma = {gamma:.3f}, eps_bg = {eps_bg:.3f}, a_param = {a_param:.3f} \n")
-
-
-    ax1.set_title(f'差分透過スペクトルの磁場依存性 (T = {T_fixed} K, d = {d*1e6:.2f} μm)')
+    ax1.set_title(f'透過スペクトル (T = {T_fixed} K, d = {d*1e6:.2f} μm)')
     ax1.set_xlabel('周波数 (THz)')
     ax1.set_ylabel('透過率 $T(B)$')
     ax1.legend()

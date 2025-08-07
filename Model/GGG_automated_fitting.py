@@ -34,40 +34,56 @@ def calculate_susceptibility(omega_array, H, T, gamma):
     return -chi_array
 
 def calculate_transmission_intensity(omega_array, mu_r_array, d, eps_bg):
-    n_complex = np.sqrt(eps_bg * mu_r_array + 0j)
-    impe = np.sqrt(mu_r_array / eps_bg + 0j)
+    n_complex = np.sqrt(eps_bg * mu_r_array + 0j); impe = np.sqrt(mu_r_array / eps_bg + 0j)
     lambda_0 = np.full_like(omega_array, np.inf, dtype=float)
-    nonzero_mask = omega_array != 0
-    lambda_0[nonzero_mask] = (2*np.pi*c)/omega_array[nonzero_mask]
-    delta = 2*np.pi*n_complex*d/lambda_0
-    numerator = 4 * impe * np.exp(1j * delta) 
-    denominator = (1 + impe)**2 - (impe - 1)**2 * np.exp(2j * delta)
-    t = np.divide(numerator, denominator, where=np.abs(denominator)>1e-12, out=np.full_like(denominator, np.inf, dtype=complex)) #分母が0に近い場合は発散
+    nonzero_mask = omega_array != 0; lambda_0[nonzero_mask] = (2*np.pi*c)/omega_array[nonzero_mask]
+    delta = 2*np.pi*n_complex*d/lambda_0; 
+    r = (impe - 1) / (impe + 1)
+    numerator = 4 * impe * np.exp(1j * delta) / (1 + impe)**2
+    denominator = 1 - r**2 * np.exp(2j * delta)
+    t = np.divide(numerator, denominator, where=np.abs(denominator)>1e-12, out=np.zeros_like(denominator, dtype=complex))
     return np.abs(t)**2
 
 # --- 2. curve_fitのためのラッパー関数 ---
-def model_wrapper(omega_array, d_fit, eps_bg_fit, a, g1, g2, g3, g4, g5, g6, g7):
-    # この関数は、10個の全パラメータを受け取るように固定
-    global model_type_to_fit # グローバル変数から現在のモデルタイプを取得
+
+# ★★★【改善点】共通の物理計算を行うベース関数を作成 ★★★
+def _physics_model_base(omega_array, B, T, model_type, params):
+    """
+    物理計算のコア部分。ラッパー関数から呼び出される。
+    """
+    d_fit, eps_bg_fit, a, *gamma_list = params
+    gamma_fit = np.array(gamma_list)
     
-    gamma_fit = np.array([g1, g2, g3, g4, g5, g6, g7])
+    H = get_hamiltonian(B)
+    chi = calculate_susceptibility(omega_array, H, T, gamma_fit)
     
-    H = get_hamiltonian(B_field)
-    chi = calculate_susceptibility(omega_array, H, Temp, gamma_fit)
-    
-    if model_type_to_fit == 'H_form':
+    if model_type == 'H_form':
         mu_r = 1 + a * chi
-    elif model_type_to_fit == 'B_form':
-        mu_r = np.divide(1, 1 - a * chi, where=(1 - a * chi)!=0, out=np.full_like(chi, np.inf, dtype=complex))
+    elif model_type == 'B_form':
+        mu_r = np.divide(1, 1 - a * chi, where=(1 - a * chi) != 0, out=np.ones_like(chi, dtype=complex))
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
     
     return calculate_transmission_intensity(omega_array, mu_r, d_fit, eps_bg_fit)
+
+# ★★★【改善点】H形式専用のラッパー関数 ★★★
+def model_wrapper_H(omega_array, d_fit, eps_bg_fit, a, g1, g2, g3, g4, g5, g6, g7):
+    # curve_fitから渡されたパラメータをリストにまとめる
+    params = [d_fit, eps_bg_fit, a, g1, g2, g3, g4, g5, g6, g7]
+    # ベース関数に、B_fieldとTempを渡して呼び出す (これらはメインスコープから参照)
+    return _physics_model_base(omega_array, B_field, Temp, 'H_form', params)
+
+# ★★★【改善点】B形式専用のラッパー関数 ★★★
+def model_wrapper_B(omega_array, d_fit, eps_bg_fit, a, g1, g2, g3, g4, g5, g6, g7):
+    params = [d_fit, eps_bg_fit, a, g1, g2, g3, g4, g5, g6, g7]
+    return _physics_model_base(omega_array, B_field, Temp, 'B_form', params)
+
 
 # --- 3. メイン実行ブロック ---
 if __name__ == '__main__':
     # --- 設定ファイルの読み込み ---
     config = configparser.ConfigParser()
     config.read('fitting_config.ini', encoding='utf-8')
-
     opt_set = config['optimization_settings']
     param_set = config['parameter_settings']
     freq_set = config['frequency_settings']
@@ -77,21 +93,15 @@ if __name__ == '__main__':
     # --- 実験データの準備 ---
     print("実験データを読み込みます...")
     df = pd.read_excel(exp_set['excel_file'], sheet_name=exp_set['sheet_name'], header=0)
-    
-    # 周波数でフィルタリング
     freq_min, freq_max = freq_set.getfloat('freq_min'), freq_set.getfloat('freq_max')
     df = df[(df['Frequency (THz)'] >= freq_min) & (df['Frequency (THz)'] <= freq_max)].copy()
     print(f"周波数範囲を {freq_min} - {freq_max} THzに限定しました。")
-
     exp_freq_thz = df['Frequency (THz)'].to_numpy(dtype=float)
-    
-    # 磁場値を正しく取得
     B_field = exp_set.getfloat('magnetic_field')
     exp_transmittance = df[f"Transmittance ({B_field}T)"].to_numpy(dtype=float)
     exp_omega_rad_s = exp_freq_thz * 1e12 * 2 * np.pi
-    
     Temp = exp_set.getfloat('temperature')
-
+    
     # --- 最適化の実行 ---
     if opt_set.getboolean('single_model'):
         model_types_to_run = [opt_set['target_model']]
@@ -102,29 +112,29 @@ if __name__ == '__main__':
     
     for model_type in model_types_to_run:
         print(f"\n--- [{model_type}] モデルのフィッティングを開始します ---")
-        model_type_to_fit = model_type # グローバル変数に設定
         
+        # ★★★【改善点】モデルタイプに応じて、使用するラッパー関数を切り替え ★★★
+        if model_type == 'H_form':
+            target_func = model_wrapper_H
+        else: # B_form
+            target_func = model_wrapper_B
+            
         # 最適化パラメータの初期値と範囲を定義
         gamma_initial = eval(param_set['gamma_ini'])
         p0 = [param_set.getfloat('d_ini'), param_set.getfloat('eps_bg_ini'), param_set.getfloat('a_param_ini')] + gamma_initial
-        
         bounds_lower = [param_set.getfloat('d_min'), param_set.getfloat('eps_bg_min'), param_set.getfloat('a_param_min')] + [param_set.getfloat('gamma_min')] * 7
         bounds_upper = [param_set.getfloat('d_max'), param_set.getfloat('eps_bg_max'), param_set.getfloat('a_param_max')] + [param_set.getfloat('gamma_max')] * 7
 
-        # curve_fitによる最適化
         try:
-            popt, pcov = curve_fit(model_wrapper, exp_omega_rad_s, exp_transmittance, p0=p0, bounds=(bounds_lower, bounds_upper))
+            # ★★★【改善点】curve_fitに、選択した関数を渡す ★★★
+            popt, pcov = curve_fit(target_func, exp_omega_rad_s, exp_transmittance, p0=p0, bounds=(bounds_lower, bounds_upper))
             best_params_all[model_type] = popt
             
             if out_set.getboolean('print_details'):
                 print("\n最適化されたパラメータ:")
-                print(f"  d = {popt[0]*1e6:.4f} um")
-                print(f"  eps_bg = {popt[1]:.4f}")
-                print(f"  a = {popt[2]:.4f}")
-                print(f"  gamma = {popt[3:]}")
+                print(f"  d = {popt[0]*1e6:.4f} um"); print(f"  eps_bg = {popt[1]:.4f}"); print(f"  a = {popt[2]:.4f}"); print(f"  gamma = {popt[3:]}")
         except Exception as e:
-            print(f"❌ フィッティング中にエラーが発生しました: {e}")
-            continue
+            print(f"❌ フィッティング中にエラーが発生しました: {e}"); continue
 
     # --- 結果の可視化 ---
     print("\nフィッティング結果をプロットします...")
@@ -136,8 +146,12 @@ if __name__ == '__main__':
 
     colors = {'H_form': 'blue', 'B_form': 'red'}
     for model_type, popt in best_params_all.items():
-        model_type_to_fit = model_type
-        fit_curve = model_wrapper(plot_omega_rad_s, *popt)
+        # ★★★【改善点】プロット時も、対応するラッパー関数を呼び出す ★★★
+        if model_type == 'H_form':
+            fit_curve = model_wrapper_H(plot_omega_rad_s, *popt)
+        else:
+            fit_curve = model_wrapper_B(plot_omega_rad_s, *popt)
+        
         ax.plot(plot_omega_rad_s / (2 * np.pi * 1e12), fit_curve, color=colors[model_type], lw=2, label=f'ベストフィット ({model_type})')
         
     ax.set_xlabel('周波数 (THz)'); ax.set_ylabel('透過率 T(B)'); ax.legend(); ax.grid(True)
@@ -145,12 +159,8 @@ if __name__ == '__main__':
     
     if out_set.getboolean('save_plot'):
         filename = out_set['output_filename_prefix']
-        plt.savefig(f"{filename}.png", dpi=300)
-        print(f"✅ グラフを '{filename}.png' に保存しました。")
-    
+        plt.savefig(f"{filename}.png", dpi=300); print(f"✅ グラフを '{filename}.png' に保存しました。")
     if out_set.getboolean('show_plot'):
         plt.show()
-    
     plt.close()
     print("\n解析が完了しました。")
-    

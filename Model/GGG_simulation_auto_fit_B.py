@@ -10,15 +10,26 @@ import time
 # これらは不変なので、グローバルスコープに配置
 kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458
 mu0 = 4.0 * np.pi * 1e-7
-eps_bg = 14.44; s = 3.5; d = 0.1578e-3
+s = 3.5
+g_factor = 1.95
 N_spin = 24 / 1.238 * 1e27  # スピン数密度
+G0 = mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
 
-# Stevens演算子などの定数行列
+# 結晶場定数
+B4_0 = 0.8 / 240 ; B6_0 = 0.04 / 5040
+B4_param = 0.606 ; B6_param = -1.513 
+B4 = B4_0 * B4_param; B6 = B6_0 * B6_param
 O04 = 60 * np.diag([7,-13,-3,9,9,-3,-13,7])
 X_O44 = np.zeros((8,8)); X_O44[3,7],X_O44[4,0]=np.sqrt(35),np.sqrt(35); X_O44[2,6],X_O44[5,1]=5*np.sqrt(3),5*np.sqrt(3); O44=12*(X_O44+X_O44.T)
 O06 = 1260 * np.diag([1,-5,9,-5,-5,9,-5,1]); X_O46 = np.zeros((8,8)); X_O46[3,7],X_O46[4,0]=3*np.sqrt(35),3*np.sqrt(35); X_O46[2,6],X_O46[5,1]=-7*np.sqrt(3),-7*np.sqrt(3); O46=60*(X_O46+X_O46.T)
+
+#Sz演算子の定義
 m_values = np.arange(s, -s - 1, -1)
 Sz = np.diag(m_values)
+
+# ★★★モデルを調整するためのパラメータ★★★
+d_init = 0.1578e-3  # Elijahが設計した膜厚
+eps_bg_init = 12 # Elijahが設計した屈折率に基づく背景誘電率(eps_bg = 3.8^2)
 # ---------------------------------------------------------
 
 # --- 2. 物理モデルクラスの定義 ---
@@ -26,24 +37,16 @@ class PhysicsModel:
     """
     物理パラメータを保持し、透過スペクトルを計算するクラス
     """
-    def __init__(self, g_factor, B4_param, B6_param, gamma, a_param):
+    def __init__(self, d, eps_bg, gamma, a_param):
         # 💡 パラメータをクラスの属性として保持
-        self.g_factor = g_factor
-        self.B4_param = B4_param
-        self.B6_param = B6_param
+        self.d = d
+        self.eps_bg = eps_bg
         self.gamma = gamma
         self.a_param = a_param
-                
-        # 派生的な定数も初期化時に計算
-        B4_0 = 0.8 / 240
-        B6_0 = 0.04 / 5040
-        self.B4 = B4_0 * self.B4_param
-        self.B6 = B6_0 * self.B6_param
-        self.G0 = mu0 * N_spin * (self.g_factor * muB)**2 / (2 * hbar)
 
     def get_hamiltonian(self, B_ext_z):
-        H_cf = (self.B4 * kB) * (O04 + 5 * O44) + (self.B6 * kB) * (O06 - 21 * O46)
-        H_zee = self.g_factor * muB * B_ext_z * Sz
+        H_cf = (B4 * kB) * (O04 + 5 * O44) + (B6 * kB) * (O06 - 21 * O46)
+        H_zee = g_factor * muB * B_ext_z * Sz
         return H_cf + H_zee
 
     def calculate_susceptibility(self, omega_array, H, T):
@@ -56,18 +59,18 @@ class PhysicsModel:
         omega_0 = delta_E / hbar
         m_vals_trans = np.arange(s, -s, -1)
         transition_strength = (s + m_vals_trans) * (s - m_vals_trans + 1)
-        numerator = self.G0 * delta_pop * transition_strength
+        numerator = G0 * delta_pop * transition_strength
         denominator = (omega_0[:, np.newaxis] - omega_array) - (1j * self.gamma)
         chi_array = np.sum(numerator[:, np.newaxis] / denominator, axis=0)
         return -self.a_param * chi_array
 
     def calculate_transmission_intensity(self, omega_array, mu_r_array):
-        n_complex = np.sqrt(eps_bg * mu_r_array + 0j)
-        impe = np.sqrt(mu_r_array / eps_bg + 0j)
+        n_complex = np.sqrt(self.eps_bg * mu_r_array + 0j)
+        impe = np.sqrt(mu_r_array / self.eps_bg + 0j)
         lambda_0 = np.full_like(omega_array, np.inf, dtype=float)
         nonzero_mask = omega_array != 0
         lambda_0[nonzero_mask] = (2 * np.pi * c) / omega_array[nonzero_mask]
-        delta = 2 * np.pi * n_complex * d / lambda_0
+        delta = 2 * np.pi * n_complex * self.d / lambda_0
         r = (impe - 1) / (impe + 1)
         numerator = 4 * impe * np.exp(1j * delta) 
         denominator = (1 + impe)**2 - (impe - 1)**2 * np.exp(2j * delta)
@@ -108,9 +111,9 @@ if __name__ == '__main__':
     T_fixed = 35.0
 
     # --- 4. 自動最適化 ---
-    param_keys = ['g_factor', 'B4_param', 'B6_param', 'gamma', 'a_param']
-    p_initial = [1.8, 0.061, -1.513, 0.11e12, 3.0]
-    bounds = [(1.5, 2.5), (-1.0, 1.0), (-2.0, 2.0), (1e10, 1e13), (0.01, 10.0)]
+    param_keys = ['d', 'eps_bg', 'gamma', 'a_param']
+    p_initial = [d_init, eps_bg_init, 0.11e12, 1.0]
+    bounds = [(0.10e-3, 0.20e-3), (12.0, 15.0), (0.5e12, 1e12), (0.8, 2.0)]
 
     def cost_function(p_array, model_type):
         """最適化用のコスト関数。クラスを利用して計算を簡潔化"""
@@ -185,5 +188,5 @@ if __name__ == '__main__':
     ax_final.legend(fontsize=11)
     ax_final.grid(True, linestyle='--', alpha=0.7)
     plt.tight_layout()
-    plt.savefig('fitting_comparison_final.png', dpi=300)
+    plt.show()
     plt.close()
