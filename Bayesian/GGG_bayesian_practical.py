@@ -2,7 +2,7 @@
 実用的なPyMCベイズ推定プログラム
 既存の物理計算ロジックを活用し、効率的なベイズ推定とLOO-CVモデル比較を実行
 """
-
+    
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -35,7 +35,7 @@ X_O44 = np.zeros((8,8)); X_O44[3,7],X_O44[4,0]=np.sqrt(35),np.sqrt(35); X_O44[2,
 O06 = 1260 * np.diag([1,-5,9,-5,-5,9,-5,1]); X_O46 = np.zeros((8,8)); X_O46[3,7],X_O46[4,0]=3*np.sqrt(35),3*np.sqrt(35); X_O46[2,6],X_O46[5,1]=-7*np.sqrt(3),-7*np.sqrt(3); O46=60*(X_O46+X_O46.T)
 
 #Sz演算子の定義
-m_values = np.arange(s, -s - 1, -1)
+m_values = np.arange(float(s), float(-s - 1), float(-1))
 Sz = np.diag(m_values)
 
 
@@ -75,7 +75,7 @@ class PhysicsCalculator:
         delta = 2 * np.pi * n_complex * d / lambda_0
         numerator = 4 * impe * np.exp(1j * delta) 
         denominator = (1 + impe)**2 - (impe - 1)**2 * np.exp(2j * delta)
-        t = np.divide(numerator, denominator, where=np.abs(denominator)>1e-12, out=np.ones_like(denominator, dtype=complex))
+        t = np.divide(numerator, denominator, where=np.abs(denominator)>1e-12, out=np.full_like(denominator,np.inf ,dtype=complex))
         return t
 
     def get_spectrum(self, omega_array, d, eps_bg, gamma, a_param, T, B, model_type):
@@ -92,38 +92,6 @@ class PhysicsCalculator:
             
         T_B = self.calculate_transmission_intensity(omega_array, mu_r_B, d, eps_bg)
         return np.abs(T_B)**2
-
-
-# PyTensorオペレータとして物理計算を登録
-@as_op(itypes=[pt.dscalar, pt.dscalar, pt.dscalar, pt.dscalar], otypes=[pt.dvector])
-def physics_model_op(d, eps_bg, gamma, a_param, 
-                    omega_array, freq_thz, T_fixed, B_field, model_type):
-    """
-    物理計算をPyTensorオペレータとして実装
-    """
-    calculator = PhysicsCalculator()
-    
-    # スペクトル計算
-    spectrum = calculator.get_spectrum(
-        omega_array, 
-        float(d), 
-        float(eps_bg), 
-        float(gamma), 
-        float(a_param), 
-        T_fixed, 
-        B_field, 
-        model_type
-    )
-    
-    # 正規化
-    min_val, max_val = np.min(spectrum), np.max(spectrum)
-    if max_val > min_val:
-        spectrum_normalized = (spectrum - min_val) / (max_val - min_val)
-    else:
-        spectrum_normalized = np.zeros_like(spectrum)
-    
-    return spectrum_normalized.astype(np.float64)
-
 
 class BayesianAnalyzer:
     """
@@ -144,73 +112,115 @@ class BayesianAnalyzer:
         指定されたモデルタイプでPyMCモデルを作成
         """
         with pm.Model() as model:
-            # 事前分布（情報的事前分布を使用）
-            d = pm.TruncatedNormal('d', mu=0.16e-3, sigma=0.02e-3, lower=0.05e-3, upper=0.25e-3)
-            eps_bg = pm.TruncatedNormal('eps_bg', mu=13.0, sigma=1.0, lower=10.0, upper=16.0)
-            gamma = pm.TruncatedNormal('gamma', mu=0.11e12, sigma=0.2e12, lower=0.01e12, upper=2.0e12)
-            a_param = pm.TruncatedNormal('a_param', mu=1.8, sigma=0.3, lower=0.1, upper=3.0)
+            # 事前分布
+            # dパラメータ: 明示的な変換を使用
+            d_log = pm.Normal('d_log', mu=np.log(0.157e-3), sigma=0.3)
+            d = pm.Deterministic('d', pt.exp(d_log))
             
+            # eps_bgパラメータ
+            eps_bg = pm.TruncatedNormal('eps_bg', mu=13.5, sigma=0.3, lower=12.5, upper=14.5)
+            
+            # gammaパラメータ: 明示的な変換
+            gamma_log = pm.Normal('gamma_log', mu=np.log(0.11e12), sigma=0.5)
+            gamma = pm.Deterministic('gamma', pt.exp(gamma_log))
+            
+            # a_paramパラメータ
+            a_param = pm.TruncatedNormal('a_param', mu=1.5, sigma=0.3, lower=0.5, upper=2.5)
+
             # 観測誤差
-            sigma = pm.HalfNormal('sigma', sigma=0.1)
-            
+            sigma_obs = pm.HalfNormal('sigma_obs', sigma=0.1)
+
             # 理論計算のためのカスタムオペレータ
             def theory_calculation(d_val, eps_bg_val, gamma_val, a_param_val):
-                # NumPy計算
-                spectrum = self.calculator.get_spectrum(
-                    self.omega_array, d_val, eps_bg_val, gamma_val, a_param_val,
-                    self.T_fixed, self.B_field, model_type
-                )
-                
-                # 正規化
-                min_val, max_val = np.min(spectrum), np.max(spectrum)
-                if max_val > min_val:
-                    spectrum_norm = (spectrum - min_val) / (max_val - min_val)
-                else:
-                    spectrum_norm = np.zeros_like(spectrum)
-                
-                # 実験周波数で内挿
-                theory_interp = np.interp(self.exp_freq_thz, self.freq_thz, spectrum_norm)
-                return theory_interp
+                try:
+                    # パラメータの有効性チェック
+                    if any(np.isnan([d_val, eps_bg_val, gamma_val, a_param_val])):
+                        raise ValueError("NaN parameter detected")
+                    
+                    if d_val <= 0 or gamma_val <= 0:
+                        raise ValueError("Negative parameter detected")
+                    
+                    # NumPy計算
+                    spectrum = self.calculator.get_spectrum(
+                        self.omega_array, d_val, eps_bg_val, gamma_val, a_param_val,
+                        self.T_fixed, self.B_field, model_type
+                    )
+                    
+                    # 正規化（数値安定性を向上）
+                    min_val, max_val = np.min(spectrum), np.max(spectrum)
+                    if max_val > min_val and not np.isnan(max_val) and not np.isnan(min_val):
+                        spectrum_norm = (spectrum - min_val) / (max_val - min_val)
+                    else:
+                        spectrum_norm = np.ones_like(spectrum) * 0.5
+                    
+                    # 実験周波数で内挿
+                    theory_interp = np.interp(self.exp_freq_thz, self.freq_thz, spectrum_norm)
+                    
+                    # NaN/Infチェック
+                    if np.any(np.isnan(theory_interp)) or np.any(np.isinf(theory_interp)):
+                        theory_interp = np.ones_like(theory_interp) * 0.5
+                    
+                    return theory_interp
+                    
+                except Exception as e:
+                    print(f"計算エラー - パラメータ: d={d_val:.2e}, eps_bg={eps_bg_val:.2f}, "
+                          f"gamma={gamma_val:.2e}, a_param={a_param_val:.2f}, エラー: {e}")
+                    return np.ones(len(self.exp_freq_thz)) * 0.5
             
-            # PyTensorカスタムオペレータ
+            # PyTensorカスタムオペレータ（シンプル化）
             @as_op(itypes=[pt.dscalar, pt.dscalar, pt.dscalar, pt.dscalar], 
                    otypes=[pt.dvector])
             def theory_op(d, eps_bg, gamma, a_param):
-                return theory_calculation(
-                    float(d), float(eps_bg), float(gamma), float(a_param)
-                ).astype(np.float64)
+                # 型変換の安全性を向上
+                d_val = np.float64(d)
+                eps_bg_val = np.float64(eps_bg) 
+                gamma_val = np.float64(gamma)
+                a_param_val = np.float64(a_param)
+                
+                result = theory_calculation(d_val, eps_bg_val, gamma_val, a_param_val)
+                
+                # 出力の型と形状を保証
+                result = np.asarray(result, dtype=np.float64)
+                if result.ndim == 0:
+                    result = np.array([result])
+                
+                return result
             
             # 理論値の計算
-            theory_spectrum = theory_op(
-                d, eps_bg, gamma, a_param
-            )
-            
-            # 尤度
-            likelihood = pm.Normal(
-                'likelihood', 
-                mu=theory_spectrum, 
-                sigma=sigma, 
-                observed=self.exp_transmittance_normalized
-            )
-            
+            theory_spectrum = theory_op(d, eps_bg, gamma, a_param)
+
+            # 尤度分布を定義
+            likelihood_dist = pm.Normal.dist(mu=theory_spectrum, sigma=sigma_obs)
+
+            # 1. LOO/WAIC計算のために、観測データの対数尤度を計算・保存する
+            # この書き方でArviZが正しく認識する
+            log_likelihood = pm.Deterministic("log_likelihood", 
+                                              pm.logp(likelihood_dist, self.exp_transmittance_normalized))
+
+            # 2. モデルのフィッティングのために、対数尤度をPotentialとしてモデルに追加
+            pm.Potential('likelihood', pm.logp(likelihood_dist, self.exp_transmittance_normalized))        
         return model
-    
-    def run_sampling(self, model, draws=1000, tune=1000, chains=2):
-        """
-        MCMCサンプリングを実行
-        """
+
+    def run_sampling(self, model, draws=1500, tune=1500, chains=4):
         with model:
-            trace = pm.sample(
-                draws=draws,
-                tune=tune,
-                chains=chains,
-                cores=4,
-                return_inferencedata=True,
-                progressbar=True,
-                target_accept=0.8
-            )
+            try:
+                trace = pm.sample(
+                    draws=draws,
+                    tune=tune,
+                    chains=chains,
+                    cores=1,
+                    return_inferencedata=True,
+                    progressbar=True,
+                    target_accept=0.90,
+                    random_seed=42,
+                    idata_kwargs={'log_likelihood': True}  # 重要：対数尤度を明示的に保存
+                                )
+                print("サンプリング成功")
+            except Exception as e:
+                print(f"サンプリングエラー: {e}")
+                return None
         return trace
-    
+
     def compare_models(self, traces: Dict[str, Any]):
         """
         LOO-CVを使ってモデルを比較
@@ -219,11 +229,19 @@ class BayesianAnalyzer:
         
         for model_type, trace in traces.items():
             try:
+                # LOO計算（単純化）
                 loo = az.loo(trace)
                 loo_results[model_type] = loo
                 print(f"{model_type}モデル - LOO: {loo.loo:.2f} ± {loo.loo_se:.2f}")
+                    
             except Exception as e:
                 print(f"{model_type}モデルのLOO計算でエラー: {e}")
+                # 代替的な情報量基準を使用
+                try:
+                    waic = az.waic(trace)
+                    print(f"{model_type}モデル - WAIC: {waic.waic:.2f} ± {waic.waic_se:.2f}")
+                except Exception as e2:
+                    print(f"{model_type}モデル: WAIC計算も失敗 - {e2}")
                 continue
         
         if len(loo_results) > 1:
@@ -253,7 +271,7 @@ class BayesianAnalyzer:
         
         plt.suptitle('パラメータの事後分布比較', fontsize=16)
         plt.tight_layout()
-        plt.savefig('bayesian_parameter_comparison.png', dpi=300, bbox_inches='tight')
+        # plt.savefig('bayesian_parameter_comparison.png', dpi=300, bbox_inches='tight')
         plt.show()
         
         # 2. トレースプロット
@@ -262,7 +280,7 @@ class BayesianAnalyzer:
                 az.plot_trace(trace, var_names=param_names, compact=True)
                 plt.suptitle(f'{model_type}モデル - MCMCトレース', fontsize=16)
                 plt.tight_layout()
-                plt.savefig(f'bayesian_trace_{model_type}.png', dpi=300, bbox_inches='tight')
+                # plt.savefig(f'bayesian_trace_{model_type}.png', dpi=300, bbox_inches='tight')
                 plt.show()
             except Exception as e:
                 print(f"{model_type}のトレースプロット作成エラー: {e}")
@@ -273,7 +291,7 @@ class BayesianAnalyzer:
                 az.plot_compare(comparison)
                 plt.title('LOO-CVによるモデル比較')
                 plt.tight_layout()
-                plt.savefig('bayesian_model_comparison.png', dpi=300, bbox_inches='tight')
+                # plt.savefig('bayesian_model_comparison.png', dpi=300, bbox_inches='tight')
                 plt.show()
             except Exception as e:
                 print(f"モデル比較プロット作成エラー: {e}")
@@ -305,9 +323,9 @@ class BayesianAnalyzer:
                 
                 for j in range(n_samples):
                     # パラメータ制約
-                    d_val = np.clip(param_samples['d'][j], 0.05e-3, 0.25e-3)
-                    eps_bg_val = np.clip(param_samples['eps_bg'][j], 10.0, 16.0)
-                    gamma_val = np.clip(param_samples['gamma'][j], 0.01e12, 2.0e12)
+                    d_val = np.clip(param_samples['d'][j], 0.1e-3, 0.25e-3)
+                    eps_bg_val = np.clip(param_samples['eps_bg'][j], 12.0, 15.0)
+                    gamma_val = np.clip(param_samples['gamma'][j], 0.01e12, 1.0e12)
                     a_param_val = np.clip(param_samples['a_param'][j], 0.1, 3.0)
                     
                     # 予測計算
@@ -361,7 +379,7 @@ class BayesianAnalyzer:
                            transform=axes[i].transAxes)
         
         plt.tight_layout()
-        plt.savefig('bayesian_posterior_predictions.png', dpi=300, bbox_inches='tight')
+        # plt.savefig('bayesian_posterior_predictions.png', dpi=300, bbox_inches='tight')
         plt.show()
     
     def save_results(self, traces: Dict[str, Any], comparison=None):
@@ -403,7 +421,7 @@ def main():
     # --- データ読み込み ---
     print("実験データを読み込みます...")
     try:
-        file_path = "Circular_Polarization_B_Field.xlsx"
+        file_path = "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\Circular_Polarization_B_Field.xlsx"
         sheet_name = 'Sheet2'
         df = pd.read_excel(file_path, sheet_name=sheet_name, header=0)
         exp_freq_thz = df['Frequency (THz)'].to_numpy(dtype=float)
@@ -444,8 +462,20 @@ def main():
             
             # サンプリング実行
             print(f"MCMCサンプリング開始...")
-            trace = analyzer.run_sampling(model, draws=800, tune=800, chains=2)
+            trace = analyzer.run_sampling(model)
             traces[model_type] = trace
+            
+            # 収束診断
+            print(f"{model_type}モデルの収束診断:")
+            try:
+                summary = az.summary(trace, var_names=['d', 'eps_bg', 'gamma', 'a_param'])
+                poor_rhat = summary[summary['r_hat'] > 1.01]
+                if len(poor_rhat) > 0:
+                    print(f"⚠️ 収束不良パラメータ: {poor_rhat.index.tolist()}")
+                else:
+                    print("✅ すべてのパラメータが収束")
+            except:
+                print("収束診断でエラー")
             
             print(f"{model_type}モデルの推定完了")
             
