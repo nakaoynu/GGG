@@ -323,7 +323,7 @@ if __name__ == '__main__':
             g_factor = pm.TruncatedNormal('g_factor', mu=g_factor_init, sigma=0.1, lower=1.8, upper=2.3)
             
             # Student-t分布による外れ値耐性
-            nu = pm.Gamma('nu', alpha=2, beta=0.1)  # 自由度パラメータ
+            nu = pm.Gamma('nu', alpha=3, beta=0.2)  # 自由度パラメータ
             sigma_obs = pm.HalfCauchy('sigma', beta=0.5)  # より保守的
 
             # 物理モデルの予測
@@ -342,6 +342,7 @@ if __name__ == '__main__':
                 chains=4, 
                 cores=4, 
                 random_seed=42, 
+                init='adapt_diag',
                 idata_kwargs={"log_likelihood": True}
             )
             
