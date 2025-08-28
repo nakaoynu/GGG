@@ -11,6 +11,7 @@ import arviz as az
 import pytensor.tensor as pt
 from pytensor.graph.op import Op
 from pytensor.graph.basic import Apply
+import pathlib
 try:
     import japanize_matplotlib # 日本語表示のため
 except ImportError:
@@ -19,6 +20,9 @@ except ImportError:
 
 # --- 0. プロット設定 ---
 plt.rcParams['figure.dpi'] = 100
+IMAGE_DIR = pathlib.Path(__file__).parent / "pymc_B_images"
+IMAGE_DIR.mkdir(exist_ok=True)
+print(f"画像は {IMAGE_DIR} に保存されます。")
 
 # --- 1. 物理定数とパラメータ定義 ---
 kB = 1.380649e-23; muB = 9.274010e-24; hbar = 1.054571e-34; c = 299792458; mu0 = 4.0 * np.pi * 1e-7
@@ -32,21 +36,29 @@ d = 157.8e-6 * 0.99
 eps_bg = 13.1404
 B4 = 0.8 / 240 * 0.606; B6 = 0.04 / 5040 * -1.513
 
+B4_init = B4 
+B6_init = B6
 gamma_init = 0.11e12
 a_init = 1.5
-g_factor_init = 1.95 
+g_factor_init = 2.02 
 
 
 # --- 2. 汎用化された物理モデル関数 ---
 
-def get_hamiltonian(B_ext_z, g_factor):
+def get_hamiltonian(B_ext_z, g_factor, B4_val=None, B6_val=None):
+    # デフォルト値としてグローバル定数を使用
+    if B4_val is None:
+        B4_val = B4
+    if B6_val is None:
+        B6_val = B6
+
     m_values = np.arange(s, -s - 1, -1)
     Sz = np.diag(m_values)
     O04 = 60*np.diag([7,-13,-3,9,9,-3,-13,7]) 
     X_O44 = np.zeros((8,8)); X_O44[3,7],X_O44[4,0]=np.sqrt(35),np.sqrt(35); X_O44[2,6],X_O44[5,1]=5*np.sqrt(3),5*np.sqrt(3); O44=12*(X_O44+X_O44.T)
     O06 = 1260*np.diag([1,-5,9,-5,-5,9,-5,1])
     X_O46 = np.zeros((8,8)); X_O46[3,7],X_O46[4,0]=3*np.sqrt(35),3*np.sqrt(35); X_O46[2,6],X_O46[5,1]=-7*np.sqrt(3),-7*np.sqrt(3); O46=60*(X_O46+X_O46.T)
-    H_cf = (B4 * kB) * (O04 + 5 * O44) + (B6 * kB) * (O06 - 21 * O46)
+    H_cf = (B4_val * kB) * (O04 + 5 * O44) + (B6_val * kB) * (O06 - 21 * O46)
     H_zee = g_factor * muB * B_ext_z * Sz
     return H_cf + H_zee
 
@@ -112,7 +124,7 @@ def calculate_normalized_transmission(omega_array, mu_r_array):
 # --- 3. PyMCと連携するためのOpクラス（マルチ磁場対応） ---
 class MultiFieldPhysicsModelOp(Op):
     """複数の磁場条件での物理モデルを同時に計算するOp"""
-    itypes = [pt.dscalar, pt.dvector, pt.dscalar] # a, gamma_array, g_factor
+    itypes = [pt.dscalar, pt.dvector, pt.dscalar, pt.dscalar, pt.dscalar] # a, gamma_array, g_factor, B4, B6
     otypes = [pt.dvector] # 出力は全磁場の連結されたT(ω)
 
     def __init__(self, omega_arrays, T_val, B_values, model_type, n_transitions):
@@ -129,27 +141,45 @@ class MultiFieldPhysicsModelOp(Op):
         self.model_type = model_type
         self.n_transitions = n_transitions
         self.total_length = sum(len(omega_array) for omega_array in omega_arrays)
+        
+        # 物理定数を設定
+        self.eps_bg = eps_bg
+        self.d = d
 
     def perform(self, node, inputs, output_storage):
-        a, gamma_array, eps_bg, d, B4, B6, g_factor = inputs
+        a, gamma_array, g_factor, B4_val, B6_val = inputs
 
-        G0 = mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
+        G0 = a * mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
         
         # 各磁場での透過率を計算
         all_transmissions = []
         
         for i, (omega_array, B_val) in enumerate(zip(self.omega_arrays, self.B_values)):
-            H_B = get_hamiltonian(B_val, g_factor)
-            chi_B_raw = calculate_susceptibility(omega_array, H_B, self.T, gamma_array)
+            H_B = get_hamiltonian(B_val, g_factor, B4_val, B6_val)
             
-            # スケーリング係数aを適用
-            chi_B = a * G0 * chi_B_raw
+            # 磁場依存性を考慮したgamma調整
+            # 高磁場では線幅が広がる傾向を考慮
+            B_ref = 5.0  # 基準磁場 [T]
+            gamma_field_factor = 1.0 + 0.15 * (B_val - B_ref) / B_ref  # 磁場依存補正
+            gamma_adjusted = gamma_array * gamma_field_factor
+            
+            chi_B_raw = calculate_susceptibility(omega_array, H_B, self.T, gamma_adjusted)
+            
+            # スケーリング係数は既にG0に含まれている
+            chi_B = G0 * chi_B_raw
             
             # モデルタイプに応じてmu_rを計算
             if self.model_type == 'H_form':
+                # H = μ₀(H + M) の関係から μᵣ = 1 + χ
                 mu_r_B = 1 + chi_B
             elif self.model_type == 'B_form':
-                mu_r_B = np.divide(1, 1 - chi_B, where=(1 - chi_B)!=0, out=np.full_like(chi_B, np.inf, dtype=complex))
+                # B = μ₀μᵣH の関係から μᵣ = 1/(1-χ)
+                epsilon = 1e-12  # 数値安定性のため
+                denominator = 1 - chi_B
+                safe_mask = np.abs(denominator) > epsilon
+                mu_r_B = np.ones_like(chi_B, dtype=complex)
+                mu_r_B[safe_mask] = 1.0 / denominator[safe_mask]
+                mu_r_B[~safe_mask] = 1e6  # 発散を避ける
             else:
                 raise ValueError("Unknown model_type")
                 
@@ -167,7 +197,7 @@ class MultiFieldPhysicsModelOp(Op):
         outputs = [pt.vector(dtype='float64', shape=(self.total_length,))]
         return Apply(self, inputs, outputs)
 
-# --- 4. 改良されたデータ読み込み関数 ---
+# --- 4. データ読み込み関数 ---
 def load_multi_field_data(file_path=None, sheet_name='Sheet2', b_field_columns=None, freq_limit=0.376, use_manual_data=False):
     """
     複数の磁場条件でのデータを読み込む（Pandasベース）
@@ -383,23 +413,29 @@ def analyze_physics_parameters(trace, model_name):
 
     g_mean = trace.posterior['g_factor'].mean().item()
     print(f"g因子: {g_mean:.3f} (理論値: ~2.0)")
+    
+    # B4とB6パラメータの分析
+    B4_mean = trace.posterior['B4'].mean().item()
+    B6_mean = trace.posterior['B6'].mean().item()
+    print(f"結晶場パラメータ B4: {B4_mean:.6f} (初期値: {B4_init:.6f})")
+    print(f"結晶場パラメータ B6: {B6_mean:.6f} (初期値: {B6_init:.6f})")
 
     G0_mean = a_mean * mu0 * N_spin * (g_mean * muB)**2 / (2 * hbar)
     print(f"G0: {G0_mean:.3e}")
 
-    # gamma配列の処理
-    gamma_array = trace.posterior['gamma'].values  # numpy配列として取得
-    if gamma_array.ndim > 1:
-        gamma_mean = np.mean(gamma_array)  # 全体の平均
-        gamma_std = np.std(gamma_array)    # 標準偏差
-        print(f"gamma(平均): {gamma_mean:.3e} ± {gamma_std:.3e}")
-        
-        # 各遷移の平均値も表示
-        gamma_per_transition = np.mean(gamma_array, axis=(0, 1))  # chain, drawの軸で平均
-        for i, gamma_val in enumerate(gamma_per_transition):
-            print(f"  gamma[{i}]: {gamma_val:.3e}")
-    else:
-        print(f"gamma: {gamma_array:.3e}")
+    # gamma配列の適切な処理
+    gamma_posterior = trace.posterior['gamma']  # (chain, draw, transition)
+    
+    # 各遷移ごとの統計を計算
+    gamma_means = gamma_posterior.mean(dim=['chain', 'draw']).values
+    gamma_stds = gamma_posterior.std(dim=['chain', 'draw']).values
+    
+    print(f"gamma配列統計:")
+    print(f"  全体平均: {np.mean(gamma_means):.3e}")
+    print(f"  全体標準偏差: {np.mean(gamma_stds):.3e}")
+    
+    for i, (mean_val, std_val) in enumerate(zip(gamma_means, gamma_stds)):
+        print(f"  gamma[{i}]: {mean_val:.3e} ± {std_val:.3e}")
     
     nu_mean = trace.posterior['nu'].mean().item()
     sigma_mean = trace.posterior['sigma'].mean().item()
@@ -410,22 +446,22 @@ def create_diagnostic_plots(traces):
     """診断プロットを作成する関数"""
     try:
         # トレースプロット
-        fig1, axes1 = plt.subplots(2, 2, figsize=(12, 8))
+        fig1, axes1 = plt.subplots(4, 2, figsize=(12, 16))
         
         if 'H_form' in traces:
-            az.plot_trace(traces['H_form'], var_names=['g_factor', 'a'], axes=axes1)
+            az.plot_trace(traces['H_form'], var_names=['g_factor', 'a', 'B4', 'B6'], axes=axes1)
             fig1.suptitle('H_form モデル トレースプロット', fontsize=14)
             plt.tight_layout()
-            plt.savefig('multi_field_trace_H_form.png', dpi=300, bbox_inches='tight')
+            plt.savefig(IMAGE_DIR / 'multi_field_fixed_trace_H_form.png', dpi=300, bbox_inches='tight')
             plt.show()
             plt.close(fig1)
         
         if 'B_form' in traces:
-            fig2, axes2 = plt.subplots(2, 2, figsize=(12, 8))
-            az.plot_trace(traces['B_form'], var_names=['g_factor', 'a'], axes=axes2)
+            fig2, axes2 = plt.subplots(4, 2, figsize=(12, 16))
+            az.plot_trace(traces['B_form'], var_names=['g_factor', 'a', 'B4', 'B6'], axes=axes2)
             fig2.suptitle('B_form モデル トレースプロット', fontsize=14)
             plt.tight_layout()
-            plt.savefig('multi_field_trace_B_form.png', dpi=300, bbox_inches='tight')
+            plt.savefig(IMAGE_DIR / 'multi_field_fixed_trace_B_form.png', dpi=300, bbox_inches='tight')
             plt.show()
             plt.close(fig2)
         
@@ -437,10 +473,11 @@ def create_diagnostic_plots(traces):
                 # トレース内の利用可能な変数をチェック
                 first_trace = list(traces.values())[0]
                 available_vars = list(first_trace.posterior.data_vars.keys())
-                plot_vars = [var for var in ['g_factor', 'a'] if var in available_vars]
+                plot_vars = [var for var in ['g_factor', 'a', 'B4', 'B6'] if var in available_vars]
 
                 if plot_vars:
-                    az.plot_forest(traces, var_names=plot_vars, ax=ax3)
+                    idata_dict = {k: v for k, v in traces.items()}
+                    az.plot_forest(idata_dict, var_names=plot_vars, ax=ax3)
                     plt.title('パラメータ比較 (フォレストプロット)', fontsize=14)
                 else:
                     # 変数名指定なしでプロット
@@ -455,18 +492,32 @@ def create_diagnostic_plots(traces):
                 plt.title('パラメータ比較 (エラー)', fontsize=14)
                 
             plt.tight_layout()
-            plt.savefig('multi_field_forest_plot.png', dpi=300, bbox_inches='tight')
+            plt.savefig(IMAGE_DIR / 'multi_field_fixed_forest_plot.png', dpi=300, bbox_inches='tight')
             plt.show()
             plt.close(fig3)
         
         # エネルギープロット
+        """
+        エネルギープロットとは？: 
+        このプロットは、サンプリングが確率分布の全体を効率的に探索できているかを評価するのに役立ちます。エネルギー遷移分布と周辺エネルギー分布という2つの分布を重ねて表示し、両者が大きく乖離している場合、サンプリングに問題がある可能性を示唆します。
+        """
+        fig4, axes4 = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
         if 'H_form' in traces:
-            axes4 = az.plot_energy(traces['H_form'])
-            plt.suptitle('H_form モデル エネルギープロット', fontsize=14)
-            plt.tight_layout()
-            plt.savefig('multi_field_energy_H_form.png', dpi=300, bbox_inches='tight')
-            plt.show()
-            plt.close()
+            az.plot_energy(traces['H_form'], ax=axes4[0])
+            axes4[0].set_title('H_form モデル')
+        else:
+            axes4[0].axis('off')
+
+        if 'B_form' in traces:
+            az.plot_energy(traces['B_form'], ax=axes4[1])
+            axes4[1].set_title('B_form モデル')
+        else:
+            axes4[1].axis('off')
+            
+        fig4.suptitle('エネルギープロット', fontsize=16)
+        plt.savefig(IMAGE_DIR / 'multi_field_fixed_energy_plots.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        plt.close(fig4)
         
         print("診断プロットが正常に作成されました。")
         return True
@@ -476,6 +527,176 @@ def create_diagnostic_plots(traces):
         import traceback
         print(traceback.format_exc())
         return None
+
+def plot_bayesian_credible_intervals(multi_field_data, traces, model_types, colors, n_samples=500):
+    """ベイズ推定による95%信用区間をプロットする関数"""
+    
+    sorted_b_values = sorted(multi_field_data.keys())
+    
+    for mt in model_types:
+        if mt not in traces:
+            continue
+            
+        trace = traces[mt]
+        
+        # サンプル数を制限して計算時間を短縮（全体で共通使用）
+        total_samples = len(trace.posterior.chain) * len(trace.posterior.draw)
+        sample_indices = np.random.choice(total_samples, 
+                                        size=min(n_samples, total_samples), 
+                                        replace=False)
+        
+        # フィッティング領域の信用区間プロット
+        fig1, axes1 = plt.subplots(1, len(multi_field_data), figsize=(5*len(multi_field_data), 6))
+        if len(multi_field_data) == 1:
+            axes1 = [axes1]
+        
+        for i, b_val in enumerate(sorted_b_values):
+            data = multi_field_data[b_val]
+            
+            # 実験データをプロット
+            axes1[i].scatter(data['frequency_filtered'], data['transmittance_normalized'], 
+                            alpha=0.8, s=30, color='black', label='実験データ', zorder=5)
+            
+            # ベイズサンプルから予測の分布を計算
+            predictions = []
+            
+            for idx in sample_indices:
+                chain_idx = idx // len(trace.posterior.draw)
+                draw_idx = idx % len(trace.posterior.draw)
+                
+                # サンプルからパラメータを取得
+                a_sample = float(trace.posterior['a'].isel(chain=chain_idx, draw=draw_idx))
+                g_factor_sample = float(trace.posterior['g_factor'].isel(chain=chain_idx, draw=draw_idx))
+                gamma_sample = trace.posterior['gamma'].isel(chain=chain_idx, draw=draw_idx).values
+                B4_sample = float(trace.posterior['B4'].isel(chain=chain_idx, draw=draw_idx))
+                B6_sample = float(trace.posterior['B6'].isel(chain=chain_idx, draw=draw_idx))
+                
+                # このサンプルでの予測を計算
+                H_sample = get_hamiltonian(B_ext_z=b_val, g_factor=g_factor_sample,
+                                         B4_val=B4_sample, B6_val=B6_sample)
+                G0_sample = a_sample * mu0 * N_spin * (g_factor_sample * muB)**2 / (2 * hbar)
+                chi_sample_raw = calculate_susceptibility(data['omega_filtered'], H_sample, T=35.0, 
+                                                        gamma_array=gamma_sample)
+                chi_sample = G0_sample * chi_sample_raw
+                
+                if mt == 'H_form':
+                    mu_r_sample = 1 + chi_sample
+                else: 
+                    mu_r_sample = 1 / (1-chi_sample)
+                
+                prediction_sample = calculate_normalized_transmission(data['omega_filtered'], mu_r_sample)
+                predictions.append(prediction_sample)
+            
+            predictions = np.array(predictions)
+            
+            # 95%信用区間を計算
+            mean_prediction = np.mean(predictions, axis=0)
+            ci_lower = np.percentile(predictions, 2.5, axis=0)
+            ci_upper = np.percentile(predictions, 97.5, axis=0)
+            
+            # 信用区間をプロット
+            axes1[i].fill_between(data['frequency_filtered'], ci_lower, ci_upper, 
+                                 alpha=0.3, color=colors[mt], label=f'95%信用区間 ({mt})')
+            
+            # 平均予測をプロット(ベイズ推定)
+            axes1[i].plot(data['frequency_filtered'], mean_prediction, 
+                         color=colors[mt], lw=2, label=f'平均予測 ({mt})')
+            
+            axes1[i].set_xlabel('周波数 (THz)')
+            axes1[i].set_ylabel('正規化透過率')
+            axes1[i].legend()
+            axes1[i].grid(True, alpha=0.3)
+            axes1[i].set_title(f'磁場 {b_val} T - 95%信用区間', fontsize=14)
+            axes1[i].set_ylim(-0.1, 1.1)
+        
+        fig1.suptitle(f'{mt}モデル: ベイズ推定95%信用区間 (フィッティング領域)', fontsize=16)
+        plt.tight_layout()
+        plt.savefig(IMAGE_DIR / f'multi_field_credible_intervals_{mt}_fitting.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        plt.close(fig1)
+        
+        # 全領域の信用区間プロット
+        fig2, axes2 = plt.subplots(1, len(multi_field_data), figsize=(5*len(multi_field_data), 6))
+        if len(multi_field_data) == 1:
+            axes2 = [axes2]
+        
+        # 全領域用のサンプル数を削減（計算コストを考慮）
+        sample_indices_reduced = sample_indices[:min(100, len(sample_indices))]
+        
+        for i, b_val in enumerate(sorted_b_values):
+            data = multi_field_data[b_val]
+            
+            # 実験データをプロット（全領域）
+            axes2[i].scatter(data['frequency_full'], data['transmittance_normalized_full'], 
+                            alpha=0.6, s=20, color='gray', label='実験データ（全領域）', zorder=5)
+            
+            # 全領域での予測用周波数グリッド
+            freq_plot_full = np.linspace(np.min(data['frequency_full']), 
+                                        np.max(data['frequency_full']), 200)
+            omega_plot_full = freq_plot_full * 1e12 * 2 * np.pi
+            
+            # ベイズサンプルから全領域予測の分布を計算
+            predictions_full = []
+            
+            for idx in sample_indices_reduced:
+                chain_idx = idx // len(trace.posterior.draw)
+                draw_idx = idx % len(trace.posterior.draw)
+                
+                # サンプルからパラメータを取得
+                a_sample = float(trace.posterior['a'].isel(chain=chain_idx, draw=draw_idx))
+                g_factor_sample = float(trace.posterior['g_factor'].isel(chain=chain_idx, draw=draw_idx))
+                gamma_sample = trace.posterior['gamma'].isel(chain=chain_idx, draw=draw_idx).values
+                B4_sample = float(trace.posterior['B4'].isel(chain=chain_idx, draw=draw_idx))
+                B6_sample = float(trace.posterior['B6'].isel(chain=chain_idx, draw=draw_idx))
+                
+                # このサンプルでの予測を計算
+                H_sample = get_hamiltonian(B_ext_z=b_val, g_factor=g_factor_sample,
+                                         B4_val=B4_sample, B6_val=B6_sample)
+                G0_sample = a_sample * mu0 * N_spin * (g_factor_sample * muB)**2 / (2 * hbar)
+                chi_sample_raw_full = calculate_susceptibility(omega_plot_full, H_sample, T=35.0, 
+                                                             gamma_array=gamma_sample)
+                chi_sample_full = G0_sample * chi_sample_raw_full
+                
+                if mt == 'H_form':
+                    mu_r_sample_full = 1 + chi_sample_full
+                else: 
+                    mu_r_sample_full = 1 / (1-chi_sample_full)
+                
+                prediction_sample_full = calculate_normalized_transmission(omega_plot_full, mu_r_sample_full)
+                predictions_full.append(prediction_sample_full)
+            
+            predictions_full = np.array(predictions_full)
+            
+            # 95%信用区間を計算
+            mean_prediction_full = np.mean(predictions_full, axis=0)
+            ci_lower_full = np.percentile(predictions_full, 2.5, axis=0)
+            ci_upper_full = np.percentile(predictions_full, 97.5, axis=0)
+            
+            # 信用区間をプロット
+            axes2[i].fill_between(freq_plot_full, ci_lower_full, ci_upper_full, 
+                                 alpha=0.3, color=colors[mt], label=f'95%信用区間 ({mt})')
+            
+            # 平均予測をプロット
+            axes2[i].plot(freq_plot_full, mean_prediction_full, 
+                         color=colors[mt], lw=2, label=f'平均予測 ({mt})')
+            
+            # フィッティング領域境界を表示
+            axes2[i].axvline(x=0.376, color='red', linestyle=':', alpha=0.7, label='フィッティング領域上限')
+            
+            axes2[i].set_xlabel('周波数 (THz)')
+            axes2[i].set_ylabel('正規化透過率')
+            axes2[i].legend()
+            axes2[i].grid(True, alpha=0.3)
+            axes2[i].set_title(f'磁場 {b_val} T - 95%信用区間（全領域）', fontsize=14)
+            axes2[i].set_ylim(-0.1, 2.0)
+        
+        fig2.suptitle(f'{mt}モデル: ベイズ推定95%信用区間 (全領域予測)', fontsize=16)
+        plt.tight_layout()
+        plt.savefig(IMAGE_DIR / f'multi_field_credible_intervals_{mt}_full.png', dpi=300, bbox_inches='tight')
+        plt.show()
+        plt.close(fig2)
+    
+    print("95%信用区間プロットが正常に作成されました。")
 
 def plot_multi_field_results(multi_field_data, best_params, model_types, colors):
     """マルチ磁場の結果をプロットする関数"""
@@ -500,7 +721,8 @@ def plot_multi_field_results(multi_field_data, best_params, model_types, colors)
                 params = best_params[mt]
                 
                 # ベストフィット曲線の計算
-                H_best = get_hamiltonian(B_ext_z=b_val, g_factor=params['g_factor_mean'])
+                H_best = get_hamiltonian(B_ext_z=b_val, g_factor=params['g_factor_mean'], 
+                                       B4_val=params['B4_mean'], B6_val=params['B6_mean'])
                 G0_best = params['a_mean'] * mu0 * N_spin * (params['g_factor_mean'] * muB)**2 / (2 * hbar)
                 chi_best_raw = calculate_susceptibility(data['omega_filtered'], H_best, T=35.0, 
                                                       gamma_array=params['gamma_mean'])
@@ -526,7 +748,7 @@ def plot_multi_field_results(multi_field_data, best_params, model_types, colors)
     
     fig1.suptitle('マルチ磁場ベイズ最適化結果: フィッティング領域', fontsize=16)
     plt.tight_layout()
-    plt.savefig('multi_field_fitting_region.png', dpi=300, bbox_inches='tight')
+    plt.savefig(IMAGE_DIR / 'multi_field_fixed_fitting_region.png', dpi=300, bbox_inches='tight')
     plt.show()
     plt.close(fig1)
 
@@ -551,7 +773,8 @@ def plot_multi_field_results(multi_field_data, best_params, model_types, colors)
             if mt in best_params:
                 params = best_params[mt]
                 
-                H_best = get_hamiltonian(B_ext_z=b_val, g_factor=params['g_factor_mean'])
+                H_best = get_hamiltonian(B_ext_z=b_val, g_factor=params['g_factor_mean'],
+                                       B4_val=params['B4_mean'], B6_val=params['B6_mean'])
                 G0_best = params['a_mean'] * mu0 * N_spin * (params['g_factor_mean'] * muB)**2 / (2 * hbar)
                 chi_best_raw_full = calculate_susceptibility(omega_plot_full, H_best, T=35.0, 
                                                            gamma_array=params['gamma_mean'])
@@ -580,7 +803,7 @@ def plot_multi_field_results(multi_field_data, best_params, model_types, colors)
     
     fig2.suptitle('マルチ磁場ベイズ最適化結果: 全領域予測', fontsize=16)
     plt.tight_layout()
-    plt.savefig('multi_field_full_range_prediction.png', dpi=300, bbox_inches='tight')
+    plt.savefig(IMAGE_DIR / 'multi_field_fixed_full_range_prediction.png', dpi=300, bbox_inches='tight')
     plt.show()
     plt.close(fig2)
 
@@ -647,48 +870,66 @@ if __name__ == '__main__':
         physics_model = MultiFieldPhysicsModelOp(omega_arrays, T_val=35.0, B_values=sorted_b_values, 
                                                  model_type=mt, n_transitions=n_transitions)
         
+        # モデルごとに独立したモデルコンテキストを作成
         with pm.Model() as model:
-            # 事前分布の設定            
-            # gammaの事前分布をトランケートして0以上に制限
-            log_gamma_sigma = pm.HalfNormal('log_gamma_sigma', sigma=1.0)
-            log_gamma_array = pm.Normal('log_gamma', mu=np.log(gamma_init), sigma=log_gamma_sigma, shape=n_transitions)
-            gamma_array = pm.Deterministic('gamma', pt.exp(log_gamma_array))
-
-            # 物理パラメータの事前分布
-            a = pm.TruncatedNormal('a', mu=a_init, sigma=1.0, lower=0.0, upper=5.0)
-            g_factor = pm.TruncatedNormal('g_factor', mu=g_factor_init, sigma=0.1, lower=1.8, upper=2.3)
+            # 階層的事前分布でgammaの変動を制御
+            GAMMA_SCALE = pt.constant(1e11)
+            gamma_mu = pm.Normal(f'gamma_mu_{mt}', mu=np.log(gamma_init / 1e11), sigma=0.3)
+            gamma_sigma = pm.HalfNormal(f'gamma_sigma_{mt}', sigma=0.3)
+            log_gamma_scaled = pm.Normal(f'log_gamma_scaled_{mt}',
+                                         mu=gamma_mu,
+                                         sigma=gamma_sigma,
+                                         shape=n_transitions)
+            gamma_array = pm.Deterministic(f'gamma_{mt}', pt.exp(log_gamma_scaled) * GAMMA_SCALE)
             
-            # Student-t分布による外れ値耐性
-            nu = pm.Gamma('nu', alpha=3, beta=0.2)  # 自由度パラメータ
-            sigma_obs = pm.HalfCauchy('sigma', beta=0.5)  # より保守的
+            # 両モデルで同一の事前分布（公平な比較のため）
+            a = pm.TruncatedNormal(f'a_{mt}', mu=a_init, sigma=0.3, lower=0.5, upper=3.0)
+            g_factor = pm.TruncatedNormal(f'g_factor_{mt}', mu=g_factor_init, sigma=0.05, lower=1.85, upper=2.20)
+            B4 = pm.Normal(f'B4_{mt}', mu=B4_init, sigma=0.3*abs(B4_init))
+            B6 = pm.Normal(f'B6_{mt}', mu=B6_init, sigma=0.3*abs(B6_init))
+            
+            # Student-t分布による外れ値耐性（モデル固有の名前）
+            nu = pm.Gamma(f'nu_{mt}', alpha=3, beta=0.2)
+            sigma_obs = pm.HalfCauchy(f'sigma_{mt}', beta=0.5)
 
-            # 物理モデルの予測（全磁場データ）
-            mu = physics_model(a, gamma_array, eps_bg, d, B4, B6, g_factor)
+            # 物理モデルの予測
+            mu = physics_model(a, gamma_array, g_factor, B4, B6)
 
-            # ロバストな尤度関数
-            Y_obs = pm.StudentT('Y_obs', 
-                           nu=nu,
-                           mu=mu, 
-                           sigma=sigma_obs, 
-                           observed=concatenated_transmittance)            
+            # 尤度関数
+            Y_obs = pm.StudentT(f'Y_obs_{mt}', 
+                       nu=nu,
+                       mu=mu, 
+                       sigma=sigma_obs, 
+                       observed=concatenated_transmittance)
+            
+            # パラメータ名をモデル後で修正するため、エイリアスを作成
+            pm.Deterministic('a', a)
+            pm.Deterministic('gamma', gamma_array)
+            pm.Deterministic('g_factor', g_factor)
+            pm.Deterministic('B4', B4)
+            pm.Deterministic('B6', B6)
+            pm.Deterministic('nu', nu)
+            pm.Deterministic('sigma', sigma_obs)
             
             traces[mt] = pm.sample(
-                2000,  # サンプル数を調整（メモリ使用量考慮）
-                tune=2000,  # チューニング数を調整
-                target_accept=0.95,  # 受容率を現実的な値に
+                4000,  # サンプル数さらに増加
+                tune=4000,  # チューニング数さらに増加
+                target_accept=0.99,  # 発散を減らすため受容率を上げる
                 chains=4, 
                 cores=4, 
-                random_seed=42, 
+                random_seed=42 + hash(mt) % 1000,  # モデルごとに異なるシード
                 init='adapt_diag',
                 idata_kwargs={"log_likelihood": True},
-                nuts={"max_treedepth": 12},  # ツリー深度を調整
-                compute_convergence_checks=False  # 収束チェックを無効化してメモリ節約
+                nuts={
+                    "max_treedepth": 15,  # より深い探索
+                },
+                compute_convergence_checks=True
             )
             
-            ppcs[mt] = pm.sample_posterior_predictive(traces[mt], random_seed=42)
+            ppcs[mt] = pm.sample_posterior_predictive(traces[mt], random_seed=42 + hash(mt) % 1000)
         
         print(f"--- [{mt}] マルチ磁場モデルのサンプリング完了 ---")
-        print(az.summary(traces[mt], var_names=['a', 'gamma', 'g_factor', 'sigma']))
+        print(az.summary(traces[mt], var_names=['a', 'gamma', 'g_factor', 'B4', 'B6', 'sigma']))
 
     # --- 5. モデル比較の結果表示 ---
     print("\n--- マルチ磁場ベイズ的モデル比較 (LOO-CV) ---")
@@ -696,12 +937,46 @@ if __name__ == '__main__':
     compare_df = az.compare(idata_dict)
     print(compare_df)
     
+    # モデル比較の詳細分析
+    print("\n=== モデル比較詳細分析 ===")
+    try:
+        # ELPD差分の直接取得を試みる
+        if len(compare_df) >= 2:
+            first_model_elpd = compare_df.iloc[0]['elpd_loo']
+            second_model_elpd = compare_df.iloc[1]['elpd_loo'] 
+            elpd_diff_calc = second_model_elpd - first_model_elpd
+            print(f"計算されたELPD差分: {elpd_diff_calc:.6f}")
+            
+            # 差分の解釈
+            if abs(elpd_diff_calc) < 1.0:
+                print("⚠️  ELPD差分が1.0未満です。モデル間の予測性能に明確な差はありません。")
+                print("   これは以下の原因が考えられます：")
+                print("   1. 両モデルが実質的に同じ物理現象を記述している")
+                print("   2. データ量が不十分でモデルの違いを捉えられない")
+                print("   3. モデル間の物理的差異が小さい")
+            elif abs(elpd_diff_calc) < 2.0:
+                print("📊 ELPD差分が小さく、モデル間の性能差は軽微です。")
+            else:
+                print("✅ ELPD差分が2.0以上で、明確なモデル選択が可能です。")
+            
+        # 各モデルの基本統計
+        print("\n各モデルの詳細:")
+        for i, model_name in enumerate(compare_df.index):
+            rank = compare_df.iloc[i]['rank']
+            elpd = compare_df.iloc[i]['elpd_loo']
+            se = compare_df.iloc[i]['se']
+            print(f"  {model_name}モデル (rank={rank}): ELPD = {elpd:.3f} ± {se:.3f}")
+            
+    except Exception as e:
+        print(f"詳細分析中にエラー: {e}")
+        print("基本的なモデル比較結果のみ表示されます。")
+    
     try:
         axes = az.plot_compare(compare_df, figsize=(8, 4))
         fig = axes.ravel()[0].figure if hasattr(axes, "ravel") else axes.figure
         fig.suptitle('マルチ磁場モデル比較', fontsize=16)
         fig.tight_layout()
-        plt.savefig('multi_field_model_comparison.png', dpi=300)
+        plt.savefig(IMAGE_DIR / 'multi_field_fixed_model_comparison.png', dpi=150)
         plt.show()
         plt.close()
     except Exception as e:
@@ -721,11 +996,15 @@ if __name__ == '__main__':
         a_mean = trace.posterior['a'].mean().item()
         gamma_mean = trace.posterior['gamma'].mean(dim=['chain', 'draw']).values
         g_factor_mean = trace.posterior['g_factor'].mean().item()
+        B4_mean = trace.posterior['B4'].mean().item()
+        B6_mean = trace.posterior['B6'].mean().item()
         
         best_params[mt] = {
             'a_mean': a_mean,
             'gamma_mean': gamma_mean,
-            'g_factor_mean': g_factor_mean
+            'g_factor_mean': g_factor_mean,
+            'B4_mean': B4_mean,
+            'B6_mean': B6_mean
         }
 
     # マルチ磁場結果のプロット
@@ -737,7 +1016,23 @@ if __name__ == '__main__':
     for mt in model_types:
         trace = traces[mt]
         ppc = ppcs[mt]
-        y_pred_mean = ppc.posterior_predictive['Y_obs'].mean(dim=['chain', 'draw']).values
+        
+        # 正しい変数名を取得
+        ppc_var_name = f'Y_obs_{mt}'
+        if ppc_var_name in ppc.posterior_predictive:
+            y_pred_mean = ppc.posterior_predictive[ppc_var_name].mean(dim=['chain', 'draw']).values
+        else:
+            # フォールバック: 利用可能な変数名を確認
+            available_vars = list(ppc.posterior_predictive.data_vars.keys())
+            print(f"利用可能な変数: {available_vars}")
+            # Y_obsで始まる変数を探す
+            y_obs_vars = [var for var in available_vars if var.startswith('Y_obs')]
+            if y_obs_vars:
+                y_pred_mean = ppc.posterior_predictive[y_obs_vars[0]].mean(dim=['chain', 'draw']).values
+            else:
+                print(f"警告: {mt} モデルの予測変数が見つかりません。")
+                continue
+                
         rmse_total = np.sqrt(np.mean((concatenated_transmittance - y_pred_mean)**2))
         
         print(f"\n{mt} モデル:")
@@ -764,16 +1059,28 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"診断・残差分析中にエラー: {e}")
 
+    # --- 9. ベイズ推定95%信用区間プロット ---
+    try:
+        print("\n=== ベイズ推定95%信用区間プロット作成中 ===")
+        plot_bayesian_credible_intervals(multi_field_data, traces, model_types, colors, n_samples=300)
+        print_memory_usage("信用区間プロット後")
+    except Exception as e:
+        print(f"信用区間プロット作成中にエラー: {e}")
+
     print("マルチ磁場ベイズ推定の全ての処理が完了しました。")
     print("\n=== 結果ファイル ===")
-    print("- multi_field_fitting_region.png: フィッティング結果")
-    print("- multi_field_full_range_prediction.png: 全領域予測")
-    print("- multi_field_model_comparison.png: モデル比較")
-    print("- multi_field_trace_H_form.png: H_formトレース")
-    print("- multi_field_trace_B_form.png: B_formトレース")
-    print("- multi_field_forest_plot.png: パラメータ比較")
-    print("- multi_field_energy_H_form.png: エネルギープロット")
-    
+    print("- multi_field_fixed_fitting_region.png: フィッティング結果")
+    print("- multi_field_fixed_full_range_prediction.png: 全領域予測")
+    print("- multi_field_fixed_model_comparison.png: モデル比較")
+    print("- multi_field_fixed_trace_H_form.png: H_formトレース")
+    print("- multi_field_fixed_trace_B_form.png: B_formトレース")
+    print("- multi_field_fixed_forest_plot.png: パラメータ比較")
+    print("- multi_field_fixed_energy_H_form.png: エネルギープロット")
+    print("- multi_field_credible_intervals_H_form_fitting.png: H_form 95%信用区間(フィッティング)")
+    print("- multi_field_credible_intervals_H_form_full.png: H_form 95%信用区間(全領域)")
+    print("- multi_field_credible_intervals_B_form_fitting.png: B_form 95%信用区間(フィッティング)")
+    print("- multi_field_credible_intervals_B_form_full.png: B_form 95%信用区間(全領域)")
+
     print("\n=== 結果要約 ===")
     print(f"最良モデル: {compare_df.index[0]}")
     print("主要パラメータ:")
@@ -782,6 +1089,14 @@ if __name__ == '__main__':
         params = best_params[best_model]
         print(f"  g因子: {params['g_factor_mean']:.3f}")
         print(f"  スケーリング係数: {params['a_mean']:.3f}")
+        print(f"  結晶場パラメータ B4: {params['B4_mean']:.6f}")
+        print(f"  結晶場パラメータ B6: {params['B6_mean']:.6f}")
+
+    print("\n信用区間プロットについて:")
+    print("- 95%信用区間は、パラメータの不確実性を考慮した予測の範囲を示します")
+    print("- 塗りつぶし領域は、95%の確率でデータが存在する範囲です")
+    print("- 実線は、すべてのサンプルからの平均予測を表します")
+    print("- フィッティング領域と全領域の両方で信用区間が計算されます")
 
     print("\n注意事項:")
     print("- divergencesが発生している →→ サンプリング品質に注意してください。")
