@@ -152,7 +152,7 @@ def calculate_chi_tensor(omega, H_ext, B4, B6, g_factor, gamma, G0):
     return chi_tensor
 
 # --- 3. PyMCと連携するためのOpクラス（マルチ磁場対応） ---
-class MultiFieldPhysicsModelOp(pt.Op):
+class MultiFieldPhysicsModelOp(Op):
     def __init__(self, model_type, freqs_all_fields, data_points_per_field):
         self.model_type = model_type
         self.freqs_all_fields = freqs_all_fields
