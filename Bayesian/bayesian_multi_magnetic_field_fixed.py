@@ -465,7 +465,7 @@ def create_diagnostic_plots(traces):
             plt.show()
             plt.close(fig2)
         
-        # フォレストプロット
+        # フォレストプロット:失敗中
         if len(traces) > 1:
             fig3, ax3 = plt.subplots(figsize=(10, 6))
             # トレース内の実際の変数名を使用
@@ -575,7 +575,7 @@ def plot_bayesian_credible_intervals(multi_field_data, traces, model_types, colo
                 H_sample = get_hamiltonian(B_ext_z=b_val, g_factor=g_factor_sample,
                                          B4_val=B4_sample, B6_val=B6_sample)
                 G0_sample = a_sample * mu0 * N_spin * (g_factor_sample * muB)**2 / (2 * hbar)
-                chi_sample_raw = calculate_susceptibility(data['omega_filtered'], H_sample, T=35.0, 
+                chi_sample_raw = calculate_susceptibility(data['omega_filtered'], H_sample, T=1.5, 
                                                         gamma_array=gamma_sample)
                 chi_sample = G0_sample * chi_sample_raw
                 
@@ -653,7 +653,7 @@ def plot_bayesian_credible_intervals(multi_field_data, traces, model_types, colo
                 H_sample = get_hamiltonian(B_ext_z=b_val, g_factor=g_factor_sample,
                                          B4_val=B4_sample, B6_val=B6_sample)
                 G0_sample = a_sample * mu0 * N_spin * (g_factor_sample * muB)**2 / (2 * hbar)
-                chi_sample_raw_full = calculate_susceptibility(omega_plot_full, H_sample, T=35.0, 
+                chi_sample_raw_full = calculate_susceptibility(omega_plot_full, H_sample, T=1.5, 
                                                              gamma_array=gamma_sample)
                 chi_sample_full = G0_sample * chi_sample_raw_full
                 
@@ -724,7 +724,7 @@ def plot_multi_field_results(multi_field_data, best_params, model_types, colors)
                 H_best = get_hamiltonian(B_ext_z=b_val, g_factor=params['g_factor_mean'], 
                                        B4_val=params['B4_mean'], B6_val=params['B6_mean'])
                 G0_best = params['a_mean'] * mu0 * N_spin * (params['g_factor_mean'] * muB)**2 / (2 * hbar)
-                chi_best_raw = calculate_susceptibility(data['omega_filtered'], H_best, T=35.0, 
+                chi_best_raw = calculate_susceptibility(data['omega_filtered'], H_best, T=1.5, 
                                                       gamma_array=params['gamma_mean'])
                 chi_best = G0_best * chi_best_raw
                 
@@ -776,7 +776,7 @@ def plot_multi_field_results(multi_field_data, best_params, model_types, colors)
                 H_best = get_hamiltonian(B_ext_z=b_val, g_factor=params['g_factor_mean'],
                                        B4_val=params['B4_mean'], B6_val=params['B6_mean'])
                 G0_best = params['a_mean'] * mu0 * N_spin * (params['g_factor_mean'] * muB)**2 / (2 * hbar)
-                chi_best_raw_full = calculate_susceptibility(omega_plot_full, H_best, T=35.0, 
+                chi_best_raw_full = calculate_susceptibility(omega_plot_full, H_best, T=1.5, 
                                                            gamma_array=params['gamma_mean'])
                 chi_best_full = G0_best * chi_best_raw_full
                 
@@ -867,7 +867,7 @@ if __name__ == '__main__':
     # --- 各モデルでサンプリングを実行 ---
     for mt in model_types:
         print(f"\n--- [{mt}] マルチ磁場モデルのサンプリングを開始します ---")
-        physics_model = MultiFieldPhysicsModelOp(omega_arrays, T_val=35.0, B_values=sorted_b_values, 
+        physics_model = MultiFieldPhysicsModelOp(omega_arrays, T_val=1.5, B_values=sorted_b_values, 
                                                  model_type=mt, n_transitions=n_transitions)
         
         # モデルごとに独立したモデルコンテキストを作成
@@ -912,9 +912,9 @@ if __name__ == '__main__':
             pm.Deterministic('sigma', sigma_obs)
             
             traces[mt] = pm.sample(
-                4000,  # サンプル数さらに増加
-                tune=4000,  # チューニング数さらに増加
-                target_accept=0.99,  # 発散を減らすため受容率を上げる
+                2000,  
+                tune=2000, 
+                target_accept=0.9,  
                 chains=4, 
                 cores=4, 
                 random_seed=42 + hash(mt) % 1000,  # モデルごとに異なるシード

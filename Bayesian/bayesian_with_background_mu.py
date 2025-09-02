@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 import pymc as pm
 import arviz as az
 import pytensor.tensor as pt
@@ -12,6 +13,8 @@ import os
 import pathlib
 import re
 from typing import List, Dict, Any
+from scipy.signal import find_peaks
+from scipy.spatial import KDTree
 
 # --- 0. 環境設定 ---
 print("--- 0. 環境設定を開始します ---")
@@ -193,8 +196,115 @@ def load_data_full_range(file_path: str, sheet_name: str) -> List[Dict[str, Any]
         print(f"磁場 {b_value} T (温度 {TEMPERATURE} K): {len(freq)}点のデータを処理。")
         
     return datasets
-
 # --- 5. 結果可視化関数 ---
+
+def analyze_and_plot_peak_differences(ax: Axes, data: Dict[str, Any], freq_plot: np.ndarray, mean_pred: np.ndarray, model_name: str):
+    """実験データと予測のピーク位置のずれを分析し、プロットする。"""
+    # 透過スペクトルのピークを検出
+    exp_peaks_indices, _ = find_peaks(data['transmittance'], prominence=0.5, distance=8)
+    exp_peak_freqs = data['frequency'][exp_peaks_indices]
+    pred_peaks_indices, _ = find_peaks(mean_pred, prominence=0.5, distance=8)
+    pred_peak_freqs = freq_plot[pred_peaks_indices]
+
+    if len(exp_peak_freqs) == 0 or len(pred_peak_freqs) == 0:
+        print(f"  磁場 {data['b_field']} T: ピークが検出できませんでした。")
+        return
+
+    tree = KDTree(pred_peak_freqs.reshape(-1, 1))
+    _, closest_indices = tree.query(exp_peak_freqs.reshape(-1, 1))
+    closest_indices = np.atleast_1d(closest_indices)
+
+    print(f"\n--- モデル '{model_name}', 磁場 {data['b_field']} T のピーク位置のずれ (GHz) ---")
+    print("----------------------------------------------------")
+    print(" 実験ピーク (THz) | 予測ピーク (THz) | ずれ (GHz) ")
+    print("-----------------|------------------|--------------")
+    peak_diffs_ghz = []
+    for i, exp_freq in enumerate(exp_peak_freqs):
+        pred_freq = pred_peak_freqs[closest_indices[i]]
+        diff_ghz = (pred_freq - exp_freq) * 1000
+        peak_diffs_ghz.append(diff_ghz)
+        print(f"      {exp_freq:.4f}     |      {pred_freq:.4f}      | {diff_ghz: >+9.2f} ")
+    print("----------------------------------------------------")
+
+    ax2 = ax.twinx()
+    ax2.bar(exp_peak_freqs, peak_diffs_ghz, width=0.015, color='purple', alpha=0.6, label='ピーク位置のずれ (GHz)')
+    ax2.set_ylabel('ピーク位置のずれ (GHz)', color='purple', fontsize=12)
+    ax2.tick_params(axis='y', labelcolor='purple')
+    ax2.axhline(0, color='purple', linestyle='--', lw=1)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax2.legend(lines + lines2, labels + labels2, loc='upper right')
+    legend = ax.get_legend()
+    if legend:
+        legend.remove()
+
+def plot_inference_results_1(datasets: List[Dict[str, Any]], trace: az.InferenceData, model_type: str, n_samples: int = 100):
+    """ベイズ推定の結果とピークのずれをプロットする。"""
+    num_conditions = len(datasets)
+    fig, axes = plt.subplots(1, num_conditions, figsize=(7 * num_conditions, 6), sharey=True)
+    if num_conditions == 1: axes = [axes]
+    
+    for i, data in enumerate(datasets):
+        ax = axes[i]
+        posterior_group = trace["posterior"]
+        n_chains = posterior_group.sizes["chain"]
+        n_draws = posterior_group.sizes["draw"]
+        total_samples = n_chains * n_draws
+        indices = np.random.choice(total_samples, min(n_samples, total_samples), replace=False)
+        freq_plot = np.linspace(data['frequency'].min(), data['frequency'].max(), 400)
+        omega_plot = freq_plot * 1e12 * 2 * np.pi
+        
+        predictions = []
+        for idx in indices:
+            chain = idx // n_draws
+            draw = idx % n_draws
+            params = {var: posterior_group[var].values[chain, draw] for var in posterior_group.data_vars}
+            
+            mu_r_0 = params['mu0_a'].item() + params['mu0_b'].item() * (data['b_field'] - 9.0)/9.0 + params['mu0_c'].item() * (data['temperature'] - 1.5)/1.5
+            G0 = params['a_scale'].item() * mu0 * N_spin * (params['g_factor'].item() * muB)**2 / (2 * hbar)
+            H = get_hamiltonian(data['b_field'], params['g_factor'].item(), params['B4'].item(), params['B6'].item())
+            chi_raw = calculate_susceptibility(omega_plot, H, data['temperature'], params['gamma'])
+            chi = G0 * chi_raw
+            mu_r_B = 1 + chi if model_type == 'H_form' else 1 / (1 - chi)
+            mu_r_total = mu_r_0 * mu_r_B
+            pred_y = calculate_normalized_transmission(omega_plot, mu_r_total)
+            predictions.append(pred_y)
+            
+        predictions = np.array(predictions)
+        mean_pred = np.mean(predictions, axis=0)
+        ci_lower, ci_upper = np.percentile(predictions, [2.5, 97.5], axis=0)
+        
+        ax.plot(freq_plot, mean_pred, color='red', lw=2.5, label='平均予測')
+        ax.fill_between(freq_plot, ci_lower, ci_upper, color='red', alpha=0.3, label='95%信用区間')
+        ax.scatter(data['frequency'], data['transmittance'], color='black', s=25, alpha=0.6, label='実験データ', zorder=5)
+        ax.set_title(f"磁場 {data['b_field']} T", fontsize=14)
+        ax.set_xlabel('周波数 (THz)', fontsize=12)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        
+        analyze_and_plot_peak_differences(ax, data, freq_plot, mean_pred, model_type)
+
+    axes[0].set_ylabel('正規化透過率', fontsize=12)
+    fig.suptitle(f'モデル "{model_type}" ベイズ推定結果 (背景透磁率モデル)', fontsize=16)
+    plt.tight_layout(rect=(0, 0.03, 1, 0.95))
+    plt.savefig(IMAGE_DIR / f'fit_result_{model_type}.png')
+    plt.show()
+
+def print_mean_parameters(trace: az.InferenceData, model_name: str):
+    """推定された全パラメータの事後分布の平均値を表示する。"""
+    print(f"\n--- モデル '{model_name}' のパラメータ平均値 ---")
+    posterior = trace["posterior"]
+    for var_name in sorted(posterior.data_vars.keys()):
+        if not var_name.endswith('_raw'):
+            mean_values = posterior[var_name].mean(dim=('chain', 'draw')).values
+            
+            # 配列かどうかで出力形式を切り替える
+            if mean_values.ndim > 0:
+                print(f"  {var_name}:")
+                for i, mean_val in enumerate(mean_values):
+                    print(f"    [{i}]: {mean_val:.4e}")
+            else:
+                mean_val = mean_values.item()
+                print(f"  {var_name:<15s}: {mean_val:.6f}")
 
 def plot_inference_results(datasets: List[Dict[str, Any]], trace: az.InferenceData, model_type: str, n_samples: int = 100):
     """ベイズ推定の結果（平均予測、95%信用区間）をプロットする。"""
@@ -309,6 +419,7 @@ if __name__ == '__main__':
                                    target_accept=0.9, idata_kwargs={"log_likelihood": True})
         
         print(f"--- モデル '{mt}' のサンプリング完了 ---")
+        print_mean_parameters(traces[mt], mt)
         summary_vars = ['a_scale', 'g_factor', 'B4', 'B6', 'gamma', 'mu0_a', 'mu0_b', 'mu0_c']
         print(az.summary(traces[mt], var_names=summary_vars))
 
@@ -335,6 +446,6 @@ if __name__ == '__main__':
     print("\n--- 5. 結果の可視化 ---")
     for mt, trace in traces.items():
         print(f"\n--- モデル '{mt}' の結果を処理中 ---")
-        plot_inference_results(datasets, trace, mt)
+        plot_inference_results_1(datasets, trace, mt)
 
     print("\nすべての処理が完了しました。")
