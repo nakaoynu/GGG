@@ -91,7 +91,7 @@ class PhysicsModelOp(Op):
         """
         PyTensorの新しいシグネチャに対応
         node: 計算グラフのノード情報（通常は使用しない）
-        inputs: 入力値のリスト [a, gamma]
+        inputs: 入力値のリスト [a, gamma, eps_bg, d, B4, B6, g_factor]
         output_storage: 出力を格納するリスト
         """
         a, gamma, eps_bg, d, B4, B6, g_factor = inputs

@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 import pymc as pm
 import arviz as az
 import pytensor.tensor as pt
-from pytensor.graph import Op, Apply
+from pytensor.graph.op import Op
+from pytensor.graph.basic import Apply
 import japanize_matplotlib # 日本語表示のため
 
 # --- 0. プロット設定 ---
@@ -114,7 +115,7 @@ if __name__ == '__main__':
         
         with pm.Model() as model:
             # 事前分布
-            a = pm.TruncatedNormal('a', mu=1.0, sigma=0.25, lower=0.0, upper=1.0)
+            a = pm.TruncatedNormal('a', mu=1.0, sigma=0.25, lower=0.8, upper=2.5)
             gamma_param = pm.HalfNormal('gamma', sigma=50e9)
             sigma_obs = pm.HalfCauchy('sigma', beta=1.0)
             
@@ -128,6 +129,7 @@ if __name__ == '__main__':
             traces[mt] = pm.sample(
                 2000, 
                 tune=2000, 
+                target_accept=0.95,
                 chains=4, 
                 cores=4,
                 random_seed=42,
@@ -141,7 +143,7 @@ if __name__ == '__main__':
     print("\n--- ベイズ的モデル比較 (LOO-CV) ---")
     # ArviZのcompare関数でモデルの予測性能を比較
     # traces辞書をInferenceDataの辞書に変換
-    idata_dict = {k: v if isinstance(v, az.InferenceData) else az.from_pymc3(trace=v) for k, v in traces.items()}
+    idata_dict = {k: v for k, v in traces.items()}
     compare_df = az.compare(idata_dict)
     print(compare_df)
     axes = az.plot_compare(compare_df, figsize=(8, 4))
@@ -210,7 +212,7 @@ if __name__ == '__main__':
     ax.legend()
     ax.grid(True)
     ax.set_ylim(bottom=0)
-    plt.savefig('fitting_result_comparison.png', dpi=300)
+    plt.savefig('test.png', dpi=300)
     plt.close()
 
     print("\n解析が完了しました。")
