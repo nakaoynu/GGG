@@ -1,15 +1,4 @@
-# two_step_fitting_analysis.py
-""""
-To Do list
-1. 計算方法の見直し
- ・ε_BG = a + b * ( B - 9.0 ) / 9.0 + c * ( T - 1.5 ) / 1.5に変更
- ・各磁場事にモデルの予測値を計算→プロット
-2. ピーク位置のずれはプロットする必要なし（表形式でまとめる）
-    この解析でうまくいかない場合は、バックグラウンドの処理を行いピーク位置の解析にのみ注力する
-
-3. H_form, B_formの切り替わり
-4. モデル評価できるようにする
-"""
+# two_step_fitting_analysis.py (修正版)
 
 import numpy as np
 import pandas as pd
@@ -51,7 +40,6 @@ B4_init = 0.002; B6_init = -0.00003
 gamma_init = 0.11e12; a_scale_init = 1.5; g_factor_init = 2.02
 
 # --- 2. 物理モデル関数 ---
-# (get_hamiltonian, calculate_susceptibility, calculate_normalized_transmissionは以前のコードと同じ)
 def get_hamiltonian(B_ext_z: float, g_factor: float, B4: float, B6: float) -> np.ndarray:
     m_values = np.arange(s, -s - 1, -1)
     Sz = np.diag(m_values)
@@ -140,36 +128,58 @@ def load_and_split_data(file_path: str, sheet_name: str, cutoff_freq: float) -> 
     return {'low_freq': low_freq_datasets, 'high_freq': high_freq_datasets}
 
 def fit_cavity_modes(datasets: List[Dict[str, Any]]) -> Dict[str, float]:
-    """Step 1: 高周波データにファブリ・ペローモデルをフィットし、光学的パラメータを決定する。"""
+    """Step 1: 高周波データにファブリ・ペローモデルをフィットし、光学的パラメータとeps_bgの磁場依存性を決定する。"""
     print("\n--- Step 1: 高周波領域の共振器モードをフィッティング ---")
     
     def cavity_model(freq_thz, d_fit, eps_bg_fit):
         omega = freq_thz * 1e12 * 2 * np.pi
-        # 磁気的効果がないため mu_r = 1
         return calculate_normalized_transmission(omega, np.ones_like(omega), d_fit, eps_bg_fit)
 
-    fit_params = {'d': [], 'eps_bg': []}
+    fit_params = {'d': [], 'eps_bg': [], 'b_field': []}
     for data in datasets:
         try:
             popt, _ = curve_fit(cavity_model, data['frequency'], data['transmittance'], p0=[d_init, eps_bg_init])
             fit_params['d'].append(popt[0])
             fit_params['eps_bg'].append(popt[1])
+            fit_params['b_field'].append(data['b_field'])
             print(f"  磁場 {data['b_field']} T: d = {popt[0]*1e6:.2f} um, eps_bg = {popt[1]:.3f}")
         except RuntimeError:
             print(f"  磁場 {data['b_field']} T: フィッティングに失敗しました。")
     
-    final_params = {key: float(np.mean(val)) for key, val in fit_params.items() if val}
-    print("----------------------------------------------------")
-    print(f"▶ Step 1 結果 (平均値): d = {final_params.get('d', 0)*1e6:.2f} um, eps_bg = {final_params.get('eps_bg', 0):.3f}")
-    print("----------------------------------------------------")
+    if not fit_params['d']:
+        return {}
+
+    final_params = {'d': float(np.mean(fit_params['d']))}
+    
+    if len(fit_params['b_field']) > 1:
+        b_fields, eps_bgs = np.array(fit_params['b_field']), np.array(fit_params['eps_bg'])
+        
+        def eps_bg_model(B, a, b):
+            return a + b * (B - 9.0) / 9.0
+            
+        popt_eps, _ = curve_fit(eps_bg_model, b_fields, eps_bgs)
+        final_params['eps_bg_a'], final_params['eps_bg_b'] = popt_eps[0], popt_eps[1]
+        
+        print("----------------------------------------------------")
+        print(f"▶ Step 1 結果 (d 平均値): d = {final_params['d']*1e6:.2f} um")
+        print(f"▶ Step 1 結果 (eps_bg フィット): a = {final_params['eps_bg_a']:.3f}, b = {final_params['eps_bg_b']:.3f}")
+        print("----------------------------------------------------")
+    else:
+        final_params['eps_bg_a'], final_params['eps_bg_b'] = float(np.mean(fit_params['eps_bg'])), 0.0
+        print("----------------------------------------------------")
+        print(f"▶ Step 1 結果 (d 平均値): d = {final_params['d']*1e6:.2f} um")
+        print(f"▶ Step 1 結果 (eps_bg): {final_params['eps_bg_a']:.3f} (データ点不足のため定数扱い)")
+        print("----------------------------------------------------")
+
     return final_params
 
 class MagneticModelOp(Op):
     """Step 2: 低周波領域の磁気パラメータを推定するためのPyMC Op。"""
-    def __init__(self, datasets: List[Dict[str, Any]], d_fixed: float, eps_bg_fixed: float):
+    def __init__(self, datasets: List[Dict[str, Any]], d_fixed: float, eps_bg_a: float, eps_bg_b: float):
         self.datasets = datasets
         self.d = d_fixed
-        self.eps_bg = eps_bg_fixed
+        self.eps_bg_a = eps_bg_a
+        self.eps_bg_b = eps_bg_b
         self.itypes = [pt.dscalar, pt.dvector, pt.dscalar, pt.dscalar] # a_scale, gamma, B4, B6
         self.otypes = [pt.dvector]
 
@@ -177,12 +187,13 @@ class MagneticModelOp(Op):
         a_scale, gamma, B4, B6 = inputs
         full_predicted_y = []
         for data in self.datasets:
+            eps_bg = self.eps_bg_a + self.eps_bg_b * (data['b_field'] - 9.0) / 9.0
             H = get_hamiltonian(data['b_field'], g_factor_init, B4, B6)
             chi_raw = calculate_susceptibility(data['omega'], H, data['temperature'], gamma)
             G0 = a_scale * mu0 * N_spin * (g_factor_init * muB)**2 / (2 * hbar)
             chi = G0 * chi_raw
-            mu_r = 1 + chi # H_formを仮定
-            predicted_y = calculate_normalized_transmission(data['omega'], mu_r, self.d, self.eps_bg)
+            mu_r = 1 + chi
+            predicted_y = calculate_normalized_transmission(data['omega'], mu_r, self.d, eps_bg)
             full_predicted_y.append(predicted_y)
         output_storage[0][0] = np.concatenate(full_predicted_y)
 
@@ -201,7 +212,7 @@ def run_bayesian_magnetic_fit(datasets: List[Dict[str, Any]], optical_params: Di
         log_gamma_offset = pm.Normal('log_gamma_offset', mu=0, sigma=1, shape=7)
         gamma = pm.Deterministic('gamma', pt.exp(log_gamma_mu + log_gamma_offset * log_gamma_sigma))
         
-        op = MagneticModelOp(datasets, d_fixed=optical_params['d'], eps_bg_fixed=optical_params['eps_bg'])
+        op = MagneticModelOp(datasets, d_fixed=optical_params['d'], eps_bg_a=optical_params['eps_bg_a'], eps_bg_b=optical_params['eps_bg_b'])
         mu = op(a_scale, gamma, B4, B6)
         
         sigma = pm.HalfCauchy('sigma', beta=0.05)
@@ -220,8 +231,11 @@ def validate_and_plot_full_spectrum(all_datasets: List[Dict[str, Any]], optical_
     """Step 3: 統合パラメータで全領域スペクトルを検証し、ピークのずれを評価する。"""
     print("\n--- Step 3: 統合パラメータによる全領域スペクトルの検証 ---")
     
-    mag_params_mean = {var: magnetic_trace['posterior'][var].mean().item() for var in ['a_scale', 'B4', 'B6']}
-    mag_params_mean['gamma'] = magnetic_trace['posterior']['gamma'].mean(dim=('chain', 'draw')).values
+    # magnetic_traceから 'posterior' グループを取得
+    posterior = magnetic_trace['posterior']
+    
+    mag_params_mean = {var: posterior[var].mean().item() for var in ['a_scale', 'B4', 'B6']}
+    mag_params_mean['gamma'] = posterior['gamma'].mean(dim=('chain', 'draw')).values
     
     num_conditions = len(all_datasets)
     fig, axes = plt.subplots(1, num_conditions, figsize=(7 * num_conditions, 6), sharey=True)
@@ -232,7 +246,11 @@ def validate_and_plot_full_spectrum(all_datasets: List[Dict[str, Any]], optical_
         freq_plot = np.linspace(data['frequency'].min(), data['frequency'].max(), 500)
         omega_plot = freq_plot * 1e12 * 2 * np.pi
         
-        # 統合パラメータで理論スペクトルを計算
+        # --- ここからがエラー修正箇所 ---
+        # Step 1 でフィットしたモデルを使い、現在の磁場条件でのeps_bgを計算
+        current_eps_bg = optical_params['eps_bg_a'] + optical_params['eps_bg_b'] * (data['b_field'] - 9.0) / 9.0
+        # --- エラー修正箇所ここまで ---
+        
         H = get_hamiltonian(data['b_field'], g_factor_init, mag_params_mean['B4'], mag_params_mean['B6'])
         chi_raw = calculate_susceptibility(omega_plot, H, data['temperature'], mag_params_mean['gamma'])
         G0 = mag_params_mean['a_scale'] * mu0 * N_spin * (g_factor_init * muB)**2 / (2 * hbar)
@@ -240,9 +258,8 @@ def validate_and_plot_full_spectrum(all_datasets: List[Dict[str, Any]], optical_
         mu_r = 1 + chi
         
         # 全領域データで正規化し直す
-        full_trans_theory = calculate_normalized_transmission(omega_plot, mu_r, optical_params['d'], optical_params['eps_bg'])
+        full_trans_theory = calculate_normalized_transmission(omega_plot, mu_r, optical_params['d'], current_eps_bg)
         
-        # 実験データも全領域で正規化
         min_exp, max_exp = data['transmittance_full'].min(), data['transmittance_full'].max()
         trans_norm_full = (data['transmittance_full'] - min_exp) / (max_exp - min_exp)
         
@@ -252,7 +269,6 @@ def validate_and_plot_full_spectrum(all_datasets: List[Dict[str, Any]], optical_
         ax.set_xlabel('周波数 (THz)', fontsize=12)
         ax.grid(True, linestyle='--', alpha=0.6)
         
-        # ピーク位置のずれを分析・プロット
         exp_peaks, _ = find_peaks(-trans_norm_full, height=-0.9, distance=8)
         pred_peaks, _ = find_peaks(-full_trans_theory, height=-0.9, distance=8)
         exp_peak_freqs = data['frequency'][exp_peaks]
@@ -261,17 +277,16 @@ def validate_and_plot_full_spectrum(all_datasets: List[Dict[str, Any]], optical_
         if len(exp_peak_freqs) > 0 and len(pred_peak_freqs) > 0:
             tree = KDTree(pred_peak_freqs.reshape(-1, 1))
             _, closest_indices = tree.query(exp_peak_freqs.reshape(-1, 1))
-            
-            # Ensure closest_indices is always an array
             closest_indices = np.atleast_1d(closest_indices)
 
             print(f"\n--- 磁場 {data['b_field']} T のピーク位置のずれ (GHz) ---")
             peak_diffs_ghz = []
             for j, exp_freq in enumerate(exp_peak_freqs):
-                pred_freq = pred_peak_freqs[closest_indices[j]]
-                diff_ghz = (pred_freq - exp_freq) * 1000
-                peak_diffs_ghz.append(diff_ghz)
-                print(f"  Exp: {exp_freq:.4f} THz, Pred: {pred_freq:.4f} THz, Diff: {diff_ghz: >+9.2f} GHz")
+                if j < len(closest_indices):
+                    pred_freq = pred_peak_freqs[closest_indices[j]]
+                    diff_ghz = (pred_freq - exp_freq) * 1000
+                    peak_diffs_ghz.append(diff_ghz)
+                    print(f"  Exp: {exp_freq:.4f} THz, Pred: {pred_freq:.4f} THz, Diff: {diff_ghz: >+9.2f} GHz")
             
             ax2 = ax.twinx()
             ax2.bar(exp_peak_freqs, peak_diffs_ghz, width=0.015, color='purple', alpha=0.6, label='ピーク位置のずれ (GHz)')
@@ -280,7 +295,7 @@ def validate_and_plot_full_spectrum(all_datasets: List[Dict[str, Any]], optical_
             ax2.axhline(0, color='purple', linestyle='--', lw=1)
             lines, labels = ax.get_legend_handles_labels()
             lines2, labels2 = ax2.get_legend_handles_labels()
-            ax.legend() # 凡例を一度作成
+            ax.legend()
             ax2.legend(lines + lines2, labels + labels2, loc='upper right')
             ax.get_legend().remove()
 
@@ -328,21 +343,17 @@ def load_data_full_range(file_path: str, sheet_name: str) -> List[Dict[str, Any]
 if __name__ == '__main__':
     print("\n--- 2段階フィッティング解析を開始します ---")
     
-    # データの読み込みと分割
     file_path = "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\Circular_Polarization_B_Field.xlsx"
-    all_data_raw = load_data_full_range(file_path, 'Sheet2') # Step3の検証用に全データも読み込む
+    all_data_raw = load_data_full_range(file_path, 'Sheet2')
     split_data = load_and_split_data(file_path, 'Sheet2', cutoff_freq=0.8)
     
-    # Step 1: 光学的パラメータの決定
     optical_params = fit_cavity_modes(split_data['high_freq'])
     
     if not optical_params:
         print("Step 1で光学的パラメータを決定できませんでした。プログラムを終了します。")
     else:
-        # Step 2: 磁気パラメータのベイズ推定
         magnetic_trace = run_bayesian_magnetic_fit(split_data['low_freq'], optical_params)
-        
-        # Step 3: 全領域での検証
         validate_and_plot_full_spectrum(all_data_raw, optical_params, magnetic_trace)
 
     print("\nすべての解析が完了しました。")
+
