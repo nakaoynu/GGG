@@ -130,134 +130,34 @@ def load_and_split_data(file_path: str, sheet_name: str, cutoff_freq: float) -> 
         high_freq_datasets.append({**base_data, 'frequency': freq[high_mask], 'transmittance': trans_norm_high, 'omega': freq[high_mask] * 1e12 * 2 * np.pi})
     return {'low_freq': low_freq_datasets, 'high_freq': high_freq_datasets}
 
-def fit_cavity_modes_with_magnetism(datasets: List[Dict[str, Any]]) -> Dict[str, float]:
-    """Step 1: 高周波データから光学的・磁気パラメータを同時決定する（磁気感受率を含む）。"""
-    print("\n--- Step 1: 高周波領域の磁気応答を含む共振器モードフィッティング ---")
-    
-    def magnetic_cavity_model(freq_thz, d_fit, eps_bg_fit, g_factor_fit, B4_fit, B6_fit, gamma_scale):
-        """磁気感受率を考慮した高周波透過率モデル"""
+def fit_cavity_modes(datasets: List[Dict[str, Any]]) -> Dict[str, float]:
+    """Step 1: 高周波データから光学的パラメータを決定する。"""
+    print("\n--- Step 1: 高周波領域の共振器モードをフィッティング ---")
+    def cavity_model(freq_thz, d_fit, eps_bg_fit):
         omega = freq_thz * 1e12 * 2 * np.pi
-        
-        # 各データセットの磁場に対応する計算（最初のデータセットの磁場を使用）
-        b_field = datasets[0]['b_field']  # 単一磁場での最適化
-        
-        # ハミルトニアンと磁気感受率の計算
-        H = get_hamiltonian(b_field, g_factor_fit, B4_fit, B6_fit)
-        
-        # 高周波用の簡略化されたガンマ（単一値）
-        gamma_array = np.full(7, gamma_scale * gamma_init)
-        chi_raw = calculate_susceptibility(omega, H, TEMPERATURE, gamma_array)
-        
-        # 磁気感受率のスケーリング（高周波では小さくなる傾向）
-        G0 = mu0 * N_spin * (g_factor_fit * muB)**2 / (2 * hbar) * 0.1  # 高周波用スケーリング係数
-        chi = G0 * chi_raw
-        
-        # H_formで透磁率を計算
-        mu_r = 1 + chi
-        
-        return calculate_normalized_transmission(omega, mu_r, d_fit, eps_bg_fit)
+        return calculate_normalized_transmission(omega, np.ones_like(omega), d_fit, eps_bg_fit)
 
-    fit_params = {'d': [], 'eps_bg': [], 'g_factor': [], 'B4': [], 'B6': [], 'gamma_scale': [], 'b_field': []}
-    
+    fit_params = {'d': [], 'eps_bg': [], 'b_field': []}
     for data in datasets:
         try:
-            # 初期推定値
-            p0 = [d_init, eps_bg_init, g_factor_init, B4_init, B6_init, 1.0]  # gamma_scale = 1.0
-            
-            # より緩い境界条件
-            bounds = (
-                [100e-6, 10.0, 1.9, -0.01, -0.001, 0.1],    # 下限
-                [200e-6, 20.0, 2.1,  0.01,  0.001, 10.0]    # 上限
-            )
-            
-            popt, pcov = curve_fit(
-                lambda freq, d, eps_bg, g, b4, b6, gamma: magnetic_cavity_model(freq, d, eps_bg, g, b4, b6, gamma),
-                data['frequency'], 
-                data['transmittance'], 
-                p0=p0,
-                bounds=bounds,
-                maxfev=2000
-            )
-            
-            d_fit, eps_bg_fit, g_factor_fit, B4_fit, B6_fit, gamma_scale_fit = popt
-            
-            fit_params['d'].append(d_fit)
-            fit_params['eps_bg'].append(eps_bg_fit)
-            fit_params['g_factor'].append(g_factor_fit)
-            fit_params['B4'].append(B4_fit)
-            fit_params['B6'].append(B6_fit)
-            fit_params['gamma_scale'].append(gamma_scale_fit)
-            fit_params['b_field'].append(data['b_field'])
-            
-            print(f"  磁場 {data['b_field']} T:")
-            print(f"    d = {d_fit*1e6:.2f} um, eps_bg = {eps_bg_fit:.3f}")
-            print(f"    g_factor = {g_factor_fit:.3f}, B4 = {B4_fit:.5f}, B6 = {B6_fit:.6f}")
-            print(f"    gamma_scale = {gamma_scale_fit:.3f}")
-            
-        except RuntimeError as e:
-            print(f"  磁場 {data['b_field']} T: 磁気フィッティングに失敗: {e}")
-            # フォールバック: 非磁性モデル
-            try:
-                def simple_cavity_model(freq_thz, d_fit, eps_bg_fit):
-                    omega = freq_thz * 1e12 * 2 * np.pi
-                    return calculate_normalized_transmission(omega, np.ones_like(omega), d_fit, eps_bg_fit)
-                
-                popt_simple, _ = curve_fit(simple_cavity_model, data['frequency'], data['transmittance'], p0=[d_init, eps_bg_init])
-                fit_params['d'].append(popt_simple[0])
-                fit_params['eps_bg'].append(popt_simple[1])
-                # デフォルト値を使用
-                fit_params['g_factor'].append(g_factor_init)
-                fit_params['B4'].append(B4_init)
-                fit_params['B6'].append(B6_init)
-                fit_params['gamma_scale'].append(1.0)
-                fit_params['b_field'].append(data['b_field'])
-                print(f"    フォールバック - d = {popt_simple[0]*1e6:.2f} um, eps_bg = {popt_simple[1]:.3f}")
-            except Exception as e2:
-                print(f"    フォールバックも失敗: {e2}")
-                continue
-    
-    if not fit_params['d']:
-        return {}
-    
-    # 平均値の計算と磁場依存性のフィッティング
-    final_params = {
-        'd': float(np.mean(fit_params['d'])),
-        'g_factor': float(np.mean(fit_params['g_factor'])),
-        'B4': float(np.mean(fit_params['B4'])),
-        'B6': float(np.mean(fit_params['B6'])),
-        'gamma_scale': float(np.mean(fit_params['gamma_scale']))
-    }
-    
-    # eps_bgの磁場依存性フィッティング
+            popt, _ = curve_fit(cavity_model, data['frequency'], data['transmittance'], p0=[d_init, eps_bg_init])
+            fit_params['d'].append(popt[0]); fit_params['eps_bg'].append(popt[1]); fit_params['b_field'].append(data['b_field'])
+            print(f"  磁場 {data['b_field']} T: d = {popt[0]*1e6:.2f} um, eps_bg = {popt[1]:.3f}")
+        except RuntimeError:
+            print(f"  磁場 {data['b_field']} T: フィッティングに失敗しました。")
+    if not fit_params['d']: return {}
+    final_params = {'d': float(np.mean(fit_params['d']))}
     if len(fit_params['b_field']) > 1:
         b_fields, eps_bgs = np.array(fit_params['b_field']), np.array(fit_params['eps_bg'])
-        def eps_bg_model(B, a, b): 
-            return a + b * (B - 9.0) / 9.0
-        try:
-            popt_eps, _ = curve_fit(eps_bg_model, b_fields, eps_bgs)
-            final_params['eps_bg_a'], final_params['eps_bg_b'] = popt_eps[0], popt_eps[1]
-            print("----------------------------------------------------")
-            print(f"▶ Step 1 結果 (磁気応答を含む):")
-            print(f"  d = {final_params['d']*1e6:.2f} um")
-            print(f"  eps_bg フィット: a = {final_params['eps_bg_a']:.3f}, b = {final_params['eps_bg_b']:.3f}")
-            print(f"  磁気パラメータ: g = {final_params['g_factor']:.3f}, B4 = {final_params['B4']:.5f}, B6 = {final_params['B6']:.6f}")
-            print(f"  gamma_scale = {final_params['gamma_scale']:.3f}")
-        except Exception as e:
-            # 線形フィッティングが失敗した場合は平均値を使用
-            final_params['eps_bg_a'] = float(np.mean(fit_params['eps_bg']))
-            final_params['eps_bg_b'] = 0.0
-            print("----------------------------------------------------")
-            print(f"▶ Step 1 結果 (磁気応答を含む、eps_bg平均値):")
-            print(f"  d = {final_params['d']*1e6:.2f} um, eps_bg = {final_params['eps_bg_a']:.3f}")
-            print(f"  磁気パラメータ: g = {final_params['g_factor']:.3f}, B4 = {final_params['B4']:.5f}, B6 = {final_params['B6']:.6f}")
-    else:
-        final_params['eps_bg_a'] = float(np.mean(fit_params['eps_bg']))
-        final_params['eps_bg_b'] = 0.0
+        def eps_bg_model(B, a, b): return a + b * (B - 9.0) / 9.0
+        popt_eps, _ = curve_fit(eps_bg_model, b_fields, eps_bgs)
+        final_params['eps_bg_a'], final_params['eps_bg_b'] = popt_eps[0], popt_eps[1]
         print("----------------------------------------------------")
-        print(f"▶ Step 1 結果 (磁気応答を含む):")
-        print(f"  d = {final_params['d']*1e6:.2f} um, eps_bg = {final_params['eps_bg_a']:.3f}")
-        print(f"  磁気パラメータ: g = {final_params['g_factor']:.3f}, B4 = {final_params['B4']:.5f}, B6 = {final_params['B6']:.6f}")
-    
+        print(f"▶ Step 1 結果 (d 平均値): d = {final_params['d']*1e6:.2f} um")
+        print(f"▶ Step 1 結果 (eps_bg フィット): a = {final_params['eps_bg_a']:.3f}, b = {final_params['eps_bg_b']:.3f}")
+    else:
+        final_params['eps_bg_a'], final_params['eps_bg_b'] = float(np.mean(fit_params['eps_bg'])), 0.0
+        print(f"▶ Step 1 結果 (d, eps_bg): d = {final_params['d']*1e6:.2f} um, eps_bg = {final_params['eps_bg_a']:.3f}")
     print("----------------------------------------------------")
     return final_params
 
@@ -287,35 +187,18 @@ class MagneticModelOp(Op):
         output_storage[0][0] = np.concatenate(full_predicted_y)
 
 def run_bayesian_magnetic_fit(datasets: List[Dict[str, Any]], optical_params: Dict[str, float], model_type: str = 'H_form') -> az.InferenceData:
-    """Step 2: 低周波データを用いて磁気パラメータのベイズ推定を実行する（Step 1の結果を事前分布として活用）。"""
+    """Step 2: 低周波データを用いて磁気パラメータのベイズ推定を実行する。"""
     print(f"\n--- Step 2: 低周波領域の磁気パラメータをベイズ推定 (モデル: {model_type}) ---")
     trans_observed = np.concatenate([d['transmittance'] for d in datasets])
-    
     with pm.Model() as model:
-        # Step 1の結果を事前分布の中心値として使用
-        if 'gamma_scale' in optical_params:
-            # Step 1で磁気パラメータが得られた場合、それを事前分布として活用
-            a_scale = pm.TruncatedNormal('a_scale', mu=optical_params['gamma_scale'], sigma=0.3, lower=0.1, upper=2.0)
-            g_factor = pm.TruncatedNormal('g_factor', mu=optical_params['g_factor'], sigma=0.05, lower=1.95, upper=2.05)
-            B4 = pm.Normal('B4', mu=optical_params['B4'], sigma=abs(optical_params['B4'])*0.5 + 0.001)
-            B6 = pm.Normal('B6', mu=optical_params['B6'], sigma=abs(optical_params['B6'])*0.5 + 0.0001)
-            print(f"Step 1の磁気パラメータを事前分布として使用:")
-            print(f"  g_factor事前分布中心: {optical_params['g_factor']:.3f}")
-            print(f"  B4事前分布中心: {optical_params['B4']:.5f}")
-            print(f"  B6事前分布中心: {optical_params['B6']:.6f}")
-        else:
-            # 従来の事前分布（Step 1で磁気パラメータが得られなかった場合）
-            a_scale = pm.TruncatedNormal('a_scale', mu=a_scale_init, sigma=0.3, lower=0.1, upper=2.0)
-            g_factor = pm.TruncatedNormal('g_factor', mu=g_factor_init, sigma=0.03, lower=1.95, upper=2.05)
-            B4 = pm.Normal('B4', mu=B4_init, sigma=abs(B4_init)*0.3)
-            B6 = pm.Normal('B6', mu=B6_init, sigma=abs(B6_init)*0.3)
-            print("デフォルトの事前分布を使用")
-        
+        a_scale = pm.TruncatedNormal('a_scale', mu=a_scale_init, sigma=0.3, lower=0.1, upper=2.0)
+        g_factor = pm.TruncatedNormal('g_factor', mu=g_factor_init, sigma=0.03, lower=1.95, upper=2.05)
+        B4 = pm.Normal('B4', mu=B4_init, sigma=abs(B4_init)*0.3)
+        B6 = pm.Normal('B6', mu=B6_init, sigma=abs(B6_init)*0.3)
         log_gamma_mu = pm.Normal('log_gamma_mu', mu=np.log(gamma_init), sigma=1.0)
         log_gamma_sigma = pm.HalfNormal('log_gamma_sigma', sigma=0.5)
         log_gamma_offset = pm.Normal('log_gamma_offset', mu=0, sigma=0.5, shape=7)
         gamma = pm.Deterministic('gamma', pt.exp(log_gamma_mu + log_gamma_offset * log_gamma_sigma))
-        
         op = MagneticModelOp(datasets, d_fixed=optical_params['d'], eps_bg_a=optical_params['eps_bg_a'], eps_bg_b=optical_params['eps_bg_b'], model_type=model_type)
         mu = op(a_scale, gamma, g_factor, B4, B6)
         sigma = pm.HalfCauchy('sigma', beta=0.05)
@@ -699,7 +582,7 @@ if __name__ == '__main__':
     file_path = "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\Circular_Polarization_B_Field.xlsx"
     all_data_raw = load_data_full_range(file_path, 'Sheet2')
     split_data = load_and_split_data(file_path, 'Sheet2', cutoff_freq=0.8)
-    optical_params = fit_cavity_modes_with_magnetism(split_data['high_freq'])
+    optical_params = fit_cavity_modes(split_data['high_freq'])
     if not optical_params:
         print("Step 1で光学的パラメータを決定できませんでした。プログラムを終了します。")
     else:
