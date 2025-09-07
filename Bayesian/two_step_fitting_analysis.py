@@ -323,12 +323,6 @@ def run_bayesian_magnetic_fit(datasets: List[Dict[str, Any]], optical_params: Di
         # 観測モデル
         Y_obs = pm.Normal('Y_obs', mu=mu, sigma=sigma, observed=trans_observed)
         
-        # NUTSサンプラーの設定
-        nuts_kwargs = {
-            "max_treedepth": 15,    # 最大探索深度
-            "target_accept": 0.95   # 受諾率目標
-        }
-
         # より安定したサンプリング設定（収束性を改善）
         cpu_count = os.cpu_count() or 4
         try:
@@ -337,8 +331,9 @@ def run_bayesian_magnetic_fit(datasets: List[Dict[str, Any]], optical_params: Di
                               tune=3000,  # チューニング数を増加
                               chains=4, 
                               cores=min(cpu_count, 4), 
-                              nuts_kwargs=nuts_kwargs,
-                              init='adapt_diag',  # 初期化方法を指定
+                              target_accept=0.95,  # 受諾率目標
+                              max_treedepth=15,     # 最大探索深度
+                              init='adapt_diag',    # 初期化方法を指定
                               idata_kwargs={"log_likelihood": True}, 
                               random_seed=42)
             
@@ -445,6 +440,12 @@ def validate_and_plot_full_spectrum(all_datasets: List[Dict[str, Any]], optical_
         ax.plot(freq_plot, mean_pred, color=color, lw=2.5, label=f'平均予測 ({model_type})')
         ax.fill_between(freq_plot, ci_lower, ci_upper, color=color, alpha=0.3, label='95%信用区間')
         ax.scatter(data['frequency'], trans_norm_full, color='black', s=25, alpha=0.6, label='実験データ (全領域)')
+        
+        # 低周波/高周波領域の境界線を追加（赤色破線）
+        cutoff_frequency = 0.8  # THz(0.378だと上手くいかなかった…, 閾値は検討の必要あり！)
+        ax.axvline(x=cutoff_frequency, color='red', linestyle='--', linewidth=2, alpha=0.7, 
+                  label='領域境界 (0.8 THz)' if i == 0 else None)
+        
         ax.set_title(f"磁場 {data['b_field']} T ({model_type})", fontsize=14); ax.set_xlabel('周波数 (THz)', fontsize=12)
         ax.grid(True, linestyle='--', alpha=0.6); ax.legend()
         
@@ -541,6 +542,11 @@ def plot_combined_model_comparison(all_datasets: List[Dict[str, Any]], optical_p
         ax.plot(b_results['freq_plot'], b_results['mean_pred'], color='blue', lw=4, label='B_form 予測', alpha=0.9)
         ax.fill_between(b_results['freq_plot'], b_results['ci_lower'], b_results['ci_upper'], 
                        color='blue', alpha=0.25, label='B_form 95%信用区間')
+
+        # 低周波/高周波領域の境界線を追加（赤色破線）
+        cutoff_frequency = 0.8  # THz
+        ax.axvline(x=cutoff_frequency, color='red', linestyle='--', linewidth=3, alpha=0.8, 
+                  label='領域境界 (0.8 THz)' if i == 0 else None)
 
         # プレゼンテーション用大型フォント設定
         ax.set_title(f"磁場 {data['b_field']} T", fontsize=28, fontweight='bold')
