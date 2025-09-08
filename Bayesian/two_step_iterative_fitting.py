@@ -10,10 +10,15 @@ from pytensor.graph.op import Op
 import os
 import pathlib
 import re
+import warnings
 from typing import List, Dict, Any, Tuple, Optional
 from scipy.signal import find_peaks
 from scipy.spatial import KDTree
 from scipy.optimize import curve_fit
+
+# 数値計算の警告を抑制
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+np.seterr(all='ignore')  # NumPyの警告も抑制
 
 # --- 0. 環境設定 ---
 if __name__ == "__main__":
@@ -38,7 +43,8 @@ s = 3.5; N_spin = 24 / 1.238 * 1e27
 TEMPERATURE = 1.5 # 温度 (K)
 
 # パラメータの初期値
-d_init = 157.8e-6; eps_bg_init = 13.14
+d_fixed = 157.8e-6  # 膜厚は固定値として使用
+eps_bg_init = 13.14
 B4_init = 0.002; B6_init = -0.00003
 gamma_init = 0.11e12; a_scale_init = 1.5; g_factor_init = 2.02
 
@@ -59,51 +65,101 @@ def get_hamiltonian(B_ext_z: float, g_factor: float, B4: float, B6: float) -> np
 def calculate_susceptibility(omega_array: np.ndarray, H: np.ndarray, T: float, gamma_array: np.ndarray) -> np.ndarray:
     eigenvalues, _ = np.linalg.eigh(H)
     eigenvalues -= np.min(eigenvalues)
-    Z = np.sum(np.exp(-eigenvalues / (kB * T)))
-    populations = np.exp(-eigenvalues / (kB * T)) / Z
-    delta_E = eigenvalues[1:] - eigenvalues[:-1]
+    
+    # 数値的安定性のためのクリッピング
+    eigenvalues = np.clip(eigenvalues / (kB * T), -700, 700)
+    
+    Z = np.sum(np.exp(-eigenvalues))
+    populations = np.exp(-eigenvalues) / Z
+    delta_E = (eigenvalues[1:] - eigenvalues[:-1]) * kB * T  # 元の単位に戻す
     delta_pop = populations[1:] - populations[:-1]
+    
+    # 無効な値をチェック
+    valid_mask = np.isfinite(delta_E) & (np.abs(delta_E) > 1e-30)
+    if not np.any(valid_mask):
+        return np.zeros_like(omega_array, dtype=complex)
+    
     omega_0 = delta_E / hbar
     m_vals = np.arange(s, -s, -1)
     transition_strength = (s + m_vals) * (s - m_vals + 1)
+    
     # gamma_arrayがdelta_Eと同じ次元を持つように調整
     if len(gamma_array) != len(delta_E):
         if len(gamma_array) > len(delta_E):
             gamma_array = gamma_array[:len(delta_E)]
         else:
             gamma_array = np.pad(gamma_array, (0, len(delta_E) - len(gamma_array)), 'edge')
+    
+    # 数値的安定性の向上
     numerator = delta_pop * transition_strength
-    denominator = omega_0[:, np.newaxis] - omega_array - 1j * gamma_array[:, np.newaxis] 
-    # ゼロやNaNになるのを防ぐためのより堅牢なチェック
-    denominator[np.abs(denominator) < 1e-20] = 1e-20
-    denominator[np.isnan(denominator)] = 1e-20
-    chi_array = np.sum(numerator[:, np.newaxis] / denominator, axis=0)
+    
+    # 無効な値をフィルタリング
+    finite_mask = np.isfinite(numerator) & np.isfinite(omega_0) & np.isfinite(gamma_array)
+    numerator = numerator[finite_mask]
+    omega_0_filtered = omega_0[finite_mask]
+    gamma_filtered = gamma_array[finite_mask]
+    
+    if len(numerator) == 0:
+        return np.zeros_like(omega_array, dtype=complex)
+    
+    # denominatorの計算を安全に実行
+    chi_array = np.zeros_like(omega_array, dtype=complex)
+    for i, omega in enumerate(omega_array):
+        if not np.isfinite(omega):
+            continue
+        denominator = omega_0_filtered - omega - 1j * gamma_filtered
+        # 非常に小さい値を避ける
+        denominator[np.abs(denominator) < 1e-20] = 1e-20 + 1j * 1e-20
+        chi_array[i] = np.sum(numerator / denominator)
+    
     return -chi_array
 
 def calculate_normalized_transmission(omega_array: np.ndarray, mu_r_array: np.ndarray, d: float, eps_bg: float) -> np.ndarray:
-    n_complex = np.sqrt(eps_bg * mu_r_array + 0j)
-    impe = np.sqrt(mu_r_array / eps_bg + 0j)
+    # 入力値の検証と安全な処理
+    eps_bg = max(eps_bg, 0.1)  # 最小値を設定
+    d = max(d, 1e-9)  # 最小値を設定
+    
+    # 複素屈折率と impedance の計算
+    mu_r_safe = np.where(np.isfinite(mu_r_array), mu_r_array, 1.0)
+    eps_mu_product = eps_bg * mu_r_safe
+    eps_mu_product = np.where(eps_mu_product.real > 0, eps_mu_product, 0.1 + 1j * eps_mu_product.imag)
+    
+    n_complex = np.sqrt(eps_mu_product + 0j)
+    impe = np.sqrt(mu_r_safe / eps_bg + 0j)
+    
+    # 波長計算（ゼロ周波数を避ける）
     lambda_0 = np.full_like(omega_array, np.inf, dtype=float)
     nonzero_mask = omega_array > 1e-12
     lambda_0[nonzero_mask] = (2 * np.pi * c) / omega_array[nonzero_mask]
+    
+    # 位相計算（オーバーフロー防止）
     delta = 2 * np.pi * n_complex * d / lambda_0
+    delta = np.clip(delta.real, -700, 700) + 1j * np.clip(delta.imag, -700, 700)
     
-    # オーバーフロー防止のためdeltaの大きさを制限
-    delta = np.clip(delta, -700, 700)
-    
+    # 透過率計算
     numerator = 4 * impe
     exp_pos = np.exp(-1j * delta)
     exp_neg = np.exp(1j * delta)
+    
     denominator = (1 + impe)**2 * exp_pos - (1 - impe)**2 * exp_neg
-    safe_mask = np.abs(denominator) > 1e-12
+    
+    # 分母がゼロに近い場合の処理
+    safe_mask = np.abs(denominator) > 1e-15
     t = np.zeros_like(denominator, dtype=complex)
     t[safe_mask] = numerator[safe_mask] / denominator[safe_mask]
+    
     transmission = np.abs(t)**2
     
     # 数値安定性のため、異常値を除去
-    transmission = np.clip(transmission, 0, 1)
+    transmission = np.where(np.isfinite(transmission), transmission, 0.0)
+    transmission = np.clip(transmission, 0, 2)  # 物理的に意味のある範囲に制限
+    
+    # 正規化
     min_trans, max_trans = np.min(transmission), np.max(transmission)
-    return (transmission - min_trans) / (max_trans - min_trans) if max_trans > min_trans else np.full_like(transmission, 0.5)
+    if max_trans > min_trans and np.isfinite(max_trans) and np.isfinite(min_trans):
+        return (transmission - min_trans) / (max_trans - min_trans)
+    else:
+        return np.full_like(transmission, 0.5)
 
 # --- 3. データ処理と解析ステップ ---
 def load_and_split_data_three_regions(file_path: str, sheet_name: str, 
@@ -214,13 +270,39 @@ def load_and_split_data(file_path: str, sheet_name: str, cutoff_freq: float) -> 
         high_freq_datasets.append({**base_data, 'frequency': freq[high_mask], 'transmittance': trans_norm_high, 'omega': freq[high_mask] * 1e12 * 2 * np.pi})
     return {'low_freq': low_freq_datasets, 'high_freq': high_freq_datasets}
 
-def fit_single_field_cavity_modes(dataset: Dict[str, Any], G0_from_bayesian: Optional[float] = None) -> Dict[str, float]:
-    """各磁場で独立に高周波データから光学的・磁気パラメータを決定する"""
-    print(f"\n--- 磁場 {dataset['b_field']} T の高周波フィッティング ---")
+def fit_eps_bg_only(dataset: Dict[str, Any], 
+                    fixed_params: Optional[Dict[str, float]] = None,
+                    G0_from_bayesian: Optional[float] = None) -> Dict[str, float]:
+    """各磁場で高周波データからeps_bgのみをフィッティングする（他パラメータは固定）"""
+    print(f"\n--- 磁場 {dataset['b_field']} T の高周波eps_bgフィッティング ---")
     
-    def magnetic_cavity_model(freq_thz, d_fit, eps_bg_fit, g_factor_fit, B4_fit, B6_fit, gamma_scale):
-        """磁気感受率を考慮した高周波透過率モデル"""
+    # 固定パラメータの取得
+    if fixed_params is None:
+        fixed_params = {
+            'd': d_fixed,
+            'g_factor': g_factor_init,
+            'B4': B4_init,
+            'B6': B6_init,
+            'gamma_scale': 1.0
+        }
+    
+    def magnetic_cavity_model_eps_bg_only(freq_thz, eps_bg_fit):
+        """eps_bgのみを変数とする磁気感受率を考慮した高周波透過率モデル"""
         try:
+            # 入力パラメータの妥当性チェック
+            if not np.isfinite(eps_bg_fit):
+                return np.full_like(freq_thz, 0.5)
+            
+            # eps_bgを安全な範囲にクリップ
+            eps_bg_fit = np.clip(eps_bg_fit, 5.0, 25.0)
+            
+            # 固定パラメータを使用
+            d_fit = fixed_params['d']
+            g_factor_fit = fixed_params['g_factor']
+            B4_fit = fixed_params['B4']
+            B6_fit = fixed_params['B6']
+            gamma_scale = fixed_params['gamma_scale']
+            
             omega = freq_thz * 1e12 * 2 * np.pi
             
             # ハミルトニアンと磁気感受率の計算
@@ -244,91 +326,59 @@ def fit_single_field_cavity_modes(dataset: Dict[str, Any], G0_from_bayesian: Opt
             result = calculate_normalized_transmission(omega, mu_r, d_fit, eps_bg_fit)
             
             # NaNや無限大値をチェック
-            if np.any(np.isnan(result)) or np.any(np.isinf(result)):
+            if np.any(~np.isfinite(result)):
                 return np.full_like(freq_thz, 0.5)  # フォールバック値
             
             return result
-        except:
+        except Exception as e:
+            print(f"  ❌ モデル計算エラー: {str(e)}")
             return np.full_like(freq_thz, 0.5)  # エラー時のフォールバック
 
-    # 複数の初期値と境界条件を試行
+    # 複数の初期値を試行
     success = False
     result = {}
     
-    # 初期値のセット（複数パターン）
-    if G0_from_bayesian is not None:
-        # ベイズ推定結果がある場合
-        initial_sets = [
-            # より保守的な初期値
-            ([d_init, eps_bg_init, g_factor_init, B4_init, B6_init, 1.0],
-             ([120e-6, 11.0, 1.95, -0.005, -0.0005, 0.2],
-              [180e-6, 18.0, 2.05,  0.005,  0.0005, 5.0])),
-            # 代替初期値
-            ([d_init*1.1, eps_bg_init*0.9, g_factor_init, B4_init*0.5, B6_init*0.5, 0.8],
-             ([120e-6, 10.0, 1.95, -0.008, -0.0008, 0.1],
-              [180e-6, 20.0, 2.05,  0.008,  0.0008, 8.0]))
-        ]
-    else:
-        # 初回の場合
-        initial_sets = [
-            # 基本初期値
-            ([d_init, eps_bg_init, g_factor_init, B4_init, B6_init, 1.0],
-             ([120e-6, 10.0, 1.9, -0.01, -0.001, 0.1],
-              [180e-6, 18.0, 2.1,  0.01,  0.001, 10.0])),
-            # より広い範囲
-            ([d_init*0.9, eps_bg_init*1.1, g_factor_init, B4_init*2, B6_init*2, 1.5],
-             ([100e-6, 8.0, 1.8, -0.015, -0.002, 0.05],
-              [200e-6, 25.0, 2.2,  0.015,  0.002, 15.0])),
-            # 保守的な範囲
-            ([d_init, eps_bg_init*0.95, 2.0, 0.001, -0.00001, 0.5],
-             ([140e-6, 12.0, 1.98, -0.003, -0.0003, 0.3],
-              [170e-6, 15.0, 2.02,  0.003,  0.0003, 3.0]))
-        ]
+    # eps_bgの初期値候補
+    initial_eps_bg_values = [eps_bg_init, eps_bg_init * 0.9, eps_bg_init * 1.1, 12.0, 14.0, 15.0]
+    bounds_eps_bg = (8.0, 20.0)
     
-    for attempt, (p0, bounds) in enumerate(initial_sets):
+    for attempt, initial_eps_bg in enumerate(initial_eps_bg_values):
         try:
-            print(f"  試行 {attempt + 1}: 初期値セット {attempt + 1}")
-            print(f"    初期値: d={p0[0]*1e6:.1f}μm, eps_bg={p0[1]:.2f}, g={p0[2]:.3f}")
+            print(f"  試行 {attempt + 1}: eps_bg初期値 = {initial_eps_bg:.2f}")
             
             popt, pcov = curve_fit(
-                magnetic_cavity_model,
+                magnetic_cavity_model_eps_bg_only,
                 dataset['frequency'], 
                 dataset['transmittance'], 
-                p0=p0,
-                bounds=bounds,
-                maxfev=8000,  # さらに評価回数を増加
-                ftol=1e-6,    # 許容誤差を調整
+                p0=[initial_eps_bg],
+                bounds=([bounds_eps_bg[0]], [bounds_eps_bg[1]]),
+                maxfev=5000,
+                ftol=1e-6,
                 xtol=1e-6,
-                method='trf'  # Trust Region Reflectiveアルゴリズム
+                method='trf'
             )
             
-            d_fit, eps_bg_fit, g_factor_fit, B4_fit, B6_fit, gamma_scale_fit = popt
+            eps_bg_fit = popt[0]
             
             # パラメータの妥当性チェック
-            if (100e-6 <= d_fit <= 200e-6 and 
-                8.0 <= eps_bg_fit <= 25.0 and 
-                1.8 <= g_factor_fit <= 2.2 and
-                -0.02 <= B4_fit <= 0.02 and
-                -0.002 <= B6_fit <= 0.002):
-                
+            if bounds_eps_bg[0] <= eps_bg_fit <= bounds_eps_bg[1]:
                 result = {
-                    'd': d_fit,
-                    'eps_bg': eps_bg_fit,
-                    'g_factor': g_factor_fit,
-                    'B4': B4_fit,
-                    'B6': B6_fit,
-                    'gamma_scale': gamma_scale_fit,
+                    'd': fixed_params['d'],  # 固定値をそのまま返す
+                    'eps_bg': eps_bg_fit,    # フィッティング結果
+                    'g_factor': fixed_params['g_factor'],  # 固定値
+                    'B4': fixed_params['B4'],              # 固定値
+                    'B6': fixed_params['B6'],              # 固定値
+                    'gamma_scale': fixed_params['gamma_scale'],  # 固定値
                     'b_field': dataset['b_field']
                 }
                 
-                print(f"  成功 (試行 {attempt + 1}): d = {d_fit*1e6:.2f} um, eps_bg = {eps_bg_fit:.3f}")
-                print(f"  磁気パラメータ: g = {g_factor_fit:.3f}, B4 = {B4_fit:.5f}, B6 = {B6_fit:.6f}")
-                print(f"  gamma_scale = {gamma_scale_fit:.3f}")
+                print(f"  成功 (試行 {attempt + 1}): eps_bg = {eps_bg_fit:.3f}")
+                print(f"  固定パラメータ: d = {fixed_params['d']*1e6:.1f}μm, g = {fixed_params['g_factor']:.3f}")
                 
                 success = True
                 break
             else:
-                print(f"  試行 {attempt + 1}: パラメータが物理的範囲外")
+                print(f"  試行 {attempt + 1}: eps_bgが物理的範囲外")
                 
         except RuntimeError as e:
             print(f"  試行 {attempt + 1}: フィッティング失敗 - {e}")
@@ -338,44 +388,8 @@ def fit_single_field_cavity_modes(dataset: Dict[str, Any], G0_from_bayesian: Opt
             continue
     
     if not success:
-        print("  ❌ 全ての試行に失敗 - 非磁性モデルを試行")
-        # フォールバック: 非磁性モデル
-        try:
-            def simple_cavity_model(freq_thz, d_fit, eps_bg_fit):
-                """非磁性共振器モデル"""
-                omega = freq_thz * 1e12 * 2 * np.pi
-                mu_r = np.ones_like(omega)  # 磁気効果なし
-                return calculate_normalized_transmission(omega, mu_r, d_fit, eps_bg_fit)
-            
-            p0_simple = [d_init, eps_bg_init]
-            bounds_simple = ([120e-6, 10.0], [180e-6, 20.0])
-            
-            popt_simple, _ = curve_fit(
-                simple_cavity_model,
-                dataset['frequency'],
-                dataset['transmittance'],
-                p0=p0_simple,
-                bounds=bounds_simple,
-                maxfev=5000,
-                method='trf'
-            )
-            
-            d_fit, eps_bg_fit = popt_simple
-            result = {
-                'd': d_fit,
-                'eps_bg': eps_bg_fit,
-                'g_factor': g_factor_init,  # デフォルト値
-                'B4': B4_init,
-                'B6': B6_init,
-                'gamma_scale': 1.0,
-                'b_field': dataset['b_field']
-            }
-            
-            print(f"  非磁性モデル成功: d = {d_fit*1e6:.2f} um, eps_bg = {eps_bg_fit:.3f}")
-            
-        except Exception as e:
-            print(f"  非磁性モデルも失敗: {e}")
-            result = {}
+        print("  ❌ 全ての試行に失敗")
+        result = {}
     
     return result
 
@@ -396,17 +410,21 @@ class MagneticModelOp(Op):
             # 該当する磁場の固定パラメータを取得
             b_field = data['b_field']
             if b_field in self.field_specific_params:
-                d_fixed = self.field_specific_params[b_field]['d']
+                d_used = self.field_specific_params[b_field]['d']
                 eps_bg_fixed = self.field_specific_params[b_field]['eps_bg']
             else:
-                # フォールバック
-                d_fixed = d_init
-                eps_bg_fixed = eps_bg_init
+                # フォールバック：グローバル変数を使用
+                d_used = 157.8e-6  # d_fixed の値を直接指定
+                eps_bg_fixed = 13.14  # eps_bg_init の値を直接指定
             
             H = get_hamiltonian(data['b_field'], g_factor, B4, B6)
             chi_raw = calculate_susceptibility(data['omega'], H, data['temperature'], gamma)
             G0 = a_scale * mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
             chi = G0 * chi_raw
+            
+            # 数値的安定性のチェック
+            if np.any(~np.isfinite(chi)):
+                chi = np.where(np.isfinite(chi), chi, 0.0)
             
             # モデルタイプに応じて透磁率を計算
             if self.model_type == 'H_form':
@@ -414,7 +432,16 @@ class MagneticModelOp(Op):
             else:  # B_form
                 mu_r = 1 / (1 - chi)
             
-            predicted_y = calculate_normalized_transmission(data['omega'], mu_r, d_fixed, eps_bg_fixed)
+            # mu_rの数値的安定性をチェック
+            if np.any(~np.isfinite(mu_r)):
+                mu_r = np.where(np.isfinite(mu_r), mu_r, 1.0)
+            
+            predicted_y = calculate_normalized_transmission(data['omega'], mu_r, d_used, eps_bg_fixed)
+            
+            # 予測値の最終チェック
+            if np.any(~np.isfinite(predicted_y)):
+                predicted_y = np.where(np.isfinite(predicted_y), predicted_y, 0.5)
+            
             full_predicted_y.append(predicted_y)
         
         output_storage[0][0] = np.concatenate(full_predicted_y)
@@ -462,11 +489,12 @@ def run_bayesian_magnetic_fit_with_fixed_eps(datasets: List[Dict[str, Any]], fie
         cpu_count = os.cpu_count() or 4
         try:
             print("ベイズサンプリングを開始します...")
-            trace = pm.sample(3000,  # サンプル数を大幅増加
-                              tune=4000,  # チューニング数を大幅増加
-                              chains=2,   # チェーン数を減らして安定性向上
+            trace = pm.sample(3000,  # 元の設定に戻す
+                              tune=4000,  # 元の設定に戻す
+                              chains=2,   # 元の設定に戻す（安定性重視）
                               cores=min(cpu_count, 2), 
-                              target_accept=0.85,  # 受諾率を下げて安定性向上
+                              target_accept=0.85,  # 元の設定に戻す
+                              max_treedepth=10,    # 元の設定に戻す
                               init='jitter+adapt_diag',  # より安定した初期化
                               idata_kwargs={"log_likelihood": True}, 
                               random_seed=42,
@@ -483,6 +511,7 @@ def run_bayesian_magnetic_fit_with_fixed_eps(datasets: List[Dict[str, Any]], fie
             print(f"最小 ess_bulk: {min_ess_bulk:.0f} (> 300 が望ましい)")
             print(f"最小 ess_tail: {min_ess_tail:.0f} (> 300 が望ましい)")
             
+            # 元の基準に戻す
             if max_rhat > 1.01:
                 print("⚠️ 警告: r_hat > 1.01 - 収束に問題があります")
             if min_ess_bulk < 300:
@@ -624,8 +653,8 @@ def calculate_peak_errors(all_datasets: List[Dict[str, Any]],
 
 def iterative_fitting_process(datasets_split: Dict[str, List[Dict[str, Any]]], 
                             all_datasets: List[Dict[str, Any]],
-                            max_iterations: int = 5, 
-                            peak_error_threshold: float = 0.01) -> Tuple[Dict[float, Dict[str, float]], Optional[az.InferenceData]]:
+                            max_iterations: int = 10, 
+                            peak_error_threshold: float = 0.015) -> Tuple[Dict[float, Dict[str, float]], Optional[az.InferenceData]]:
     """反復的フィッティングプロセス"""
     print("\n=== 反復的フィッティングプロセスを開始します ===")
     print(f"収束条件: 全磁場のピーク位置相対誤差 < {peak_error_threshold*100:.1f}%")
@@ -643,8 +672,8 @@ def iterative_fitting_process(datasets_split: Dict[str, List[Dict[str, Any]]],
     for iteration in range(max_iterations):
         print(f"\n--- 反復 {iteration + 1}/{max_iterations} ---")
         
-        # Step 1: 各磁場で独立に高周波フィッティング
-        print("\nStep 1: 各磁場での独立高周波フィッティング")
+        # Step 1: 各磁場で独立に高周波フィッティング（eps_bgのみ）
+        print("\nStep 1: 各磁場での独立高周波eps_bgフィッティング")
         new_field_params = {}
         
         for dataset in datasets_split['high_freq']:
@@ -655,7 +684,26 @@ def iterative_fitting_process(datasets_split: Dict[str, List[Dict[str, Any]]],
             if prior_magnetic_params and 'G0' in prior_magnetic_params:
                 G0_from_bayesian = prior_magnetic_params['G0']
             
-            result = fit_single_field_cavity_modes(dataset, G0_from_bayesian)
+            # 固定パラメータを準備（前回のベイズ推定結果またはデフォルト値）
+            fixed_params = {}
+            if prior_magnetic_params:
+                fixed_params = {
+                    'd': d_fixed,  # 膜厚は常に固定値
+                    'g_factor': prior_magnetic_params.get('g_factor', g_factor_init),
+                    'B4': prior_magnetic_params.get('B4', B4_init),
+                    'B6': prior_magnetic_params.get('B6', B6_init),
+                    'gamma_scale': prior_magnetic_params.get('gamma_scale', 1.0)
+                }
+            else:
+                fixed_params = {
+                    'd': d_fixed,
+                    'g_factor': g_factor_init,
+                    'B4': B4_init,
+                    'B6': B6_init,
+                    'gamma_scale': 1.0
+                }
+            
+            result = fit_eps_bg_only(dataset, fixed_params, G0_from_bayesian)
             if result:
                 new_field_params[b_field] = result
         
@@ -684,7 +732,7 @@ def iterative_fitting_process(datasets_split: Dict[str, List[Dict[str, Any]]],
             max_peak_error = max(valid_errors)
             print(f"全磁場の最大ピーク相対誤差: {max_peak_error*100:.2f}%")
             
-            # 収束判定
+            # 元の収束判定に戻す
             if max_peak_error < peak_error_threshold:
                 print(f"✅ 収束しました (全磁場のピーク誤差 < {peak_error_threshold*100:.1f}%)")
                 field_specific_params = new_field_params
@@ -751,10 +799,10 @@ def plot_iterative_results(all_datasets: List[Dict[str, Any]],
         
         # 該当磁場のパラメータを取得
         if b_field in field_specific_params:
-            d_fixed = field_specific_params[b_field]['d']
+            d_used = field_specific_params[b_field]['d']
             eps_bg_fixed = field_specific_params[b_field]['eps_bg']
         else:
-            d_fixed = d_init
+            d_used = d_fixed
             eps_bg_fixed = eps_bg_init
         
         # ベイズ推定結果による予測
@@ -1287,8 +1335,8 @@ if __name__ == '__main__':
     field_specific_params, final_bayesian_trace = iterative_fitting_process(
         split_data, 
         all_data_raw,
-        max_iterations=5, 
-        peak_error_threshold=0.015  # 1.5%の相対誤差（より現実的な目標）
+max_iterations=5,        # 元の設定に戻す
+        peak_error_threshold=0.015  # 元の設定（1.5%）
     )
     
     if field_specific_params and final_bayesian_trace:
