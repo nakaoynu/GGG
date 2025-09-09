@@ -29,7 +29,7 @@ if __name__ == "__main__":
     except ImportError:
         print("警告: japanize_matplotlib が見つかりません。")
     plt.rcParams['figure.dpi'] = 120
-    IMAGE_DIR = pathlib.Path(__file__).parent / "iterative_analysis_results_1"
+    IMAGE_DIR = pathlib.Path(__file__).parent / "iterative_analysis_results_2"
     IMAGE_DIR.mkdir(exist_ok=True)
     print(f"画像は '{IMAGE_DIR.resolve()}' に保存されます。")
 
@@ -44,9 +44,9 @@ TEMPERATURE = 1.5 # 温度 (K)
 
 # パラメータの初期値
 d_fixed = 157.8e-6  # 膜厚は固定値として使用
-eps_bg_init = 13.14
-B4_init = 0.002; B6_init = -0.00003
-gamma_init = 0.11e12; a_scale_init = 1.5; g_factor_init = 2.02
+eps_bg_init = 14.20
+B4_init = 0.001149; B6_init = -0.000010
+gamma_init = 0.11e12; a_scale_init = 0.604971; g_factor_init = 2.015445
 
 # --- 2. 物理モデル関数 ---
 def get_hamiltonian(B_ext_z: float, g_factor: float, B4: float, B6: float) -> np.ndarray:
@@ -338,9 +338,23 @@ def fit_eps_bg_only(dataset: Dict[str, Any],
     success = False
     result = {}
     
-    # eps_bgの初期値候補
-    initial_eps_bg_values = [eps_bg_init, eps_bg_init * 0.9, eps_bg_init * 1.1, 12.0, 14.0, 15.0]
-    bounds_eps_bg = (8.0, 20.0)
+    # eps_bgの初期値候補（磁場依存性を考慮）
+    b_field = dataset['b_field']
+    if b_field >= 9.0:
+        # 高磁場では若干低めの初期値から開始
+        initial_eps_bg_values = [eps_bg_init * 0.95, eps_bg_init * 0.90, eps_bg_init, 
+                                eps_bg_init * 1.05, 12.5, 13.5, 14.5]
+        bounds_eps_bg = (10.0, 18.0)  # 範囲を若干拡張
+    elif b_field >= 7.0:
+        # 中間磁場
+        initial_eps_bg_values = [eps_bg_init, eps_bg_init * 0.95, eps_bg_init * 1.05, 
+                                12.0, 13.0, 14.0, 15.0]
+        bounds_eps_bg = (10.0, 17.0)
+    else:
+        # 低磁場
+        initial_eps_bg_values = [eps_bg_init, eps_bg_init * 0.9, eps_bg_init * 1.1, 
+                                12.0, 14.0, 15.0]
+        bounds_eps_bg = (10.0, 16.0)
     
     for attempt, initial_eps_bg in enumerate(initial_eps_bg_values):
         try:
@@ -446,6 +460,27 @@ class MagneticModelOp(Op):
         
         output_storage[0][0] = np.concatenate(full_predicted_y)
 
+def adaptive_sampling_config(n_datasets: int, prior_magnetic_params: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+    """データセット数に応じて適応的にサンプリング設定を調整"""
+    if n_datasets <= 5:
+        # 小規模：高精度設定
+        if prior_magnetic_params is not None:
+            return {"draws": 1500, "tune": 2000, "target_accept": 0.80}
+        else:
+            return {"draws": 2000, "tune": 2500, "target_accept": 0.85}
+    elif n_datasets <= 10:
+        # 中規模：バランス設定
+        if prior_magnetic_params is not None:
+            return {"draws": 1200, "tune": 1600, "target_accept": 0.78}
+        else:
+            return {"draws": 1600, "tune": 2000, "target_accept": 0.82}
+    else:
+        # 大規模（20+）：効率重視設定
+        if prior_magnetic_params is not None:
+            return {"draws": 800, "tune": 1200, "target_accept": 0.75}
+        else:
+            return {"draws": 1200, "tune": 1800, "target_accept": 0.80}
+
 def run_bayesian_magnetic_fit_with_fixed_eps(datasets: List[Dict[str, Any]], field_specific_params: Dict[float, Dict[str, float]], 
                                            prior_magnetic_params: Optional[Dict[str, float]] = None, model_type: str = 'H_form') -> az.InferenceData:
     """Step 2: 磁場毎の固定eps_bgを使用してベイズ推定を実行する"""
@@ -485,17 +520,20 @@ def run_bayesian_magnetic_fit_with_fixed_eps(datasets: List[Dict[str, Any]], fie
         # 観測モデル
         Y_obs = pm.Normal('Y_obs', mu=mu, sigma=sigma, observed=trans_observed)
         
-        # サンプリング設定
+        # サンプリング設定（データセット数に応じて適応的調整）
         cpu_count = os.cpu_count() or 4
+        n_datasets = len(datasets)
+        sampling_config = adaptive_sampling_config(n_datasets, prior_magnetic_params)
+        
         try:
-            print("ベイズサンプリングを開始します...")
-            trace = pm.sample(3000,  # 元の設定に戻す
-                              tune=4000,  # 元の設定に戻す
-                              chains=2,   # 元の設定に戻す（安定性重視）
+            print(f"ベイズサンプリングを開始します...（{n_datasets}データセット用最適化設定）")
+            trace = pm.sample(int(sampling_config["draws"]),
+                              tune=int(sampling_config["tune"]),
+                              chains=2,   
                               cores=min(cpu_count, 2), 
-                              target_accept=0.85,  # 元の設定に戻す
-                              max_treedepth=10,    # 元の設定に戻す
-                              init='jitter+adapt_diag',  # より安定した初期化
+                              target_accept=sampling_config["target_accept"],
+                              max_treedepth=8 if n_datasets > 10 else 10,  # 大規模時は深度削減
+                              init='jitter+adapt_diag',
                               idata_kwargs={"log_likelihood": True}, 
                               random_seed=42,
                               progressbar=True)
@@ -655,7 +693,19 @@ def iterative_fitting_process(datasets_split: Dict[str, List[Dict[str, Any]]],
                             all_datasets: List[Dict[str, Any]],
                             max_iterations: int = 10, 
                             peak_error_threshold: float = 0.015) -> Tuple[Dict[float, Dict[str, float]], Optional[az.InferenceData]]:
-    """反復的フィッティングプロセス"""
+    """反復的フィッティングプロセス（データセット数に応じて自動最適化）"""
+    n_datasets = len(all_datasets)
+    
+    # データセット数に応じて最適化
+    if n_datasets > 15:
+        max_iterations = min(max_iterations, 2)  # 大規模時は2回に制限
+        peak_error_threshold = max(peak_error_threshold, 0.025)  # 収束条件緩和
+        print(f"大規模データセット({n_datasets}個)用最適化: 反復{max_iterations}回, 閾値{peak_error_threshold*100:.1f}%")
+    elif n_datasets > 8:
+        max_iterations = min(max_iterations, 3)  # 中規模時は3回
+        peak_error_threshold = max(peak_error_threshold, 0.020)
+        print(f"中規模データセット({n_datasets}個)用最適化: 反復{max_iterations}回, 閾値{peak_error_threshold*100:.1f}%")
+    
     print("\n=== 反復的フィッティングプロセスを開始します ===")
     print(f"収束条件: 全磁場のピーク位置相対誤差 < {peak_error_threshold*100:.1f}%")
     
@@ -854,7 +904,7 @@ def plot_iterative_results(all_datasets: List[Dict[str, Any]],
     fig.suptitle('反復的フィッティング結果（磁場別独立eps_bg）', fontsize=16)
     plt.tight_layout(rect=(0, 0.03, 1, 0.95))
     plt.savefig(IMAGE_DIR / 'iterative_fitting_results.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    # plt.show()
     
     # eps_bgの磁場依存性プロット
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
@@ -899,7 +949,7 @@ def plot_iterative_results(all_datasets: List[Dict[str, Any]],
     
     plt.tight_layout()
     plt.savefig(IMAGE_DIR / 'eps_bg_and_peak_errors.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    # plt.show()
 
 def plot_credible_intervals(all_datasets: List[Dict[str, Any]], 
                            field_specific_params: Dict[float, Dict[str, float]], 
@@ -987,7 +1037,7 @@ def plot_credible_intervals(all_datasets: List[Dict[str, Any]],
     fig.suptitle(f'95%信用区間付き検証結果 ({model_type})', fontsize=16)
     plt.tight_layout(rect=(0, 0.03, 1, 0.95))
     plt.savefig(IMAGE_DIR / f'credible_intervals_{model_type}.png')
-    plt.show()
+    # plt.show()
 
 def plot_combined_model_comparison(all_datasets: List[Dict[str, Any]], 
                                  field_specific_params: Dict[float, Dict[str, float]], 
@@ -1103,7 +1153,7 @@ def plot_combined_model_comparison(all_datasets: List[Dict[str, Any]],
 
     plt.savefig(IMAGE_DIR / 'combined_model_comparison.png', dpi=300, bbox_inches='tight', 
                 facecolor='white', edgecolor='none')
-    plt.show()
+    # plt.show()
 
 def plot_model_selection_results(traces: Dict[str, az.InferenceData]):
     """LOO-CVの結果を横棒グラフで出力"""
@@ -1194,7 +1244,7 @@ def plot_model_selection_results(traces: Dict[str, az.InferenceData]):
         
         plt.savefig(IMAGE_DIR / 'model_comparison.png', dpi=600, bbox_inches='tight', 
                    facecolor='white', edgecolor='none')
-        plt.show()
+        # plt.show()
         
         # コンソール表示による詳細比較
         print(f"\n=== LOO-CV モデル選択結果（詳細） ===")
@@ -1244,30 +1294,54 @@ def plot_model_selection_results(traces: Dict[str, az.InferenceData]):
 
 def run_model_comparison_analysis(split_data: Dict[str, List[Dict[str, Any]]], 
                                  all_data_raw: List[Dict[str, Any]], 
-                                 field_specific_params: Dict[float, Dict[str, float]]) -> Dict[str, az.InferenceData]:
-    """H_formとB_formの両方で解析を実行してモデル比較を行う"""
+                                 field_specific_params: Dict[float, Dict[str, float]], 
+                                 existing_h_form_trace: Optional[az.InferenceData] = None) -> Dict[str, az.InferenceData]:
+    """H_formとB_formの両方で解析を実行してモデル比較を行う（重複実行を避ける）"""
     print("\n=== H_form と B_form の比較解析を開始 ===")
     
     traces = {}
     
-    # H_formとB_formの両方をテスト
-    for model_type in ['H_form', 'B_form']:
-        print(f"\n--- {model_type} モデルでベイズ推定実行 ---")
+    # H_formの処理：既存の結果があれば再利用、なければ新規実行
+    if existing_h_form_trace is not None:
+        print("\n--- H_form モデル: 既存の結果を再利用 ---")
+        traces['H_form'] = existing_h_form_trace
+        print("✅ H_form結果を再利用しました（計算時間短縮）")
+        
+        # 個別の信用区間プロット
+        plot_credible_intervals(all_data_raw, field_specific_params, existing_h_form_trace, 'H_form')
+    else:
+        print("\n--- H_form モデルでベイズ推定実行 ---")
         try:
             trace = run_bayesian_magnetic_fit_with_fixed_eps(
                 split_data['low_freq'], 
                 field_specific_params, 
                 prior_magnetic_params=None, 
-                model_type=model_type
+                model_type='H_form'
             )
-            traces[model_type] = trace
+            traces['H_form'] = trace
             
             # 個別の信用区間プロット
-            plot_credible_intervals(all_data_raw, field_specific_params, trace, model_type)
+            plot_credible_intervals(all_data_raw, field_specific_params, trace, 'H_form')
             
         except Exception as e:
-            print(f"❌ {model_type} モデルの実行に失敗: {e}")
-            continue
+            print(f"❌ H_form モデルの実行に失敗: {e}")
+    
+    # B_formの処理：常に新規実行
+    print("\n--- B_form モデルでベイズ推定実行 ---")
+    try:
+        trace = run_bayesian_magnetic_fit_with_fixed_eps(
+            split_data['low_freq'], 
+            field_specific_params, 
+            prior_magnetic_params=None, 
+            model_type='B_form'
+        )
+        traces['B_form'] = trace
+        
+        # 個別の信用区間プロット
+        plot_credible_intervals(all_data_raw, field_specific_params, trace, 'B_form')
+        
+    except Exception as e:
+        print(f"❌ B_form モデルの実行に失敗: {e}")
     
     if len(traces) >= 2:
         # 統合比較プロット
@@ -1331,21 +1405,22 @@ if __name__ == '__main__':
                                                    low_cutoff=0.378,   # 低周波領域: [~, 0.378THz]
                                                    high_cutoff=0.45)   # 高周波領域: [0.45THz, ~]
     
-    # 反復的フィッティング実行
+    # 反復的フィッティング実行（高速化版）
     field_specific_params, final_bayesian_trace = iterative_fitting_process(
         split_data, 
         all_data_raw,
-max_iterations=5,        # 元の設定に戻す
-        peak_error_threshold=0.015  # 元の設定（1.5%）
+        max_iterations=3,        # 反復回数削減（結果から判断すると3回で十分）
+        peak_error_threshold=0.020  # 2.0%に緩和（現実的な目標）
     )
     
     if field_specific_params and final_bayesian_trace:
         # 結果の可視化（従来版）
         plot_iterative_results(all_data_raw, field_specific_params, final_bayesian_trace)
         
-        # 新機能: H_formとB_formの比較解析
+        # 新機能: H_formとB_formの比較解析（H_form結果を再利用）
         print("\n=== H_form と B_form の比較解析を開始 ===")
-        comparison_traces = run_model_comparison_analysis(split_data, all_data_raw, field_specific_params)
+        comparison_traces = run_model_comparison_analysis(split_data, all_data_raw, field_specific_params, 
+                                                        existing_h_form_trace=final_bayesian_trace)
         
         # 最終結果のサマリー
         print("\n=== 最終結果サマリー ===")
