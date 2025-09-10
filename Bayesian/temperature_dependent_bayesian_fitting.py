@@ -78,7 +78,27 @@ def get_hamiltonian(B_ext_z: float, g_factor: float, B4: float, B6: float) -> np
     return H_cf + H_zee
 
 def calculate_susceptibility(omega_array: np.ndarray, H: np.ndarray, T: float, gamma_array: np.ndarray) -> np.ndarray:
-    """磁気感受率を計算する（two_step_iterative_fitting.py版の数値安定性向上版）"""
+    """磁気感受率を計算する（温度依存gamma対応・型安全版）"""
+    
+    # === 型チェック強化: gamma_arrayの型安全性確保 ===
+    if np.isscalar(gamma_array):
+        # 単一値の場合は7つの遷移に対応する配列に変換
+        gamma_array = np.full(7, gamma_array)
+        print(f"  [TYPE_SAFE] gamma_arrayが単一値でした。7要素配列に変換: {gamma_array}")
+    elif not isinstance(gamma_array, np.ndarray):
+        gamma_array = np.array(gamma_array)
+        print(f"  [TYPE_SAFE] gamma_arrayを配列に変換: {type(gamma_array)}")
+    
+    # gamma_arrayが0次元配列の場合も修正
+    if gamma_array.ndim == 0:
+        gamma_array = np.full(7, float(gamma_array))
+        print(f"  [TYPE_SAFE] gamma_arrayが0次元配列でした。7要素配列に変換: {gamma_array}")
+    
+    # gamma_arrayのサイズチェック
+    if gamma_array.size == 1:
+        gamma_array = np.full(7, gamma_array.item())
+        print(f"  [TYPE_SAFE] gamma_arrayがサイズ1でした。7要素配列に変換")
+    
     eigenvalues, _ = np.linalg.eigh(H)
     eigenvalues -= np.min(eigenvalues)
     
@@ -99,12 +119,15 @@ def calculate_susceptibility(omega_array: np.ndarray, H: np.ndarray, T: float, g
     m_vals = np.arange(s, -s, -1)
     transition_strength = (s + m_vals) * (s - m_vals + 1)
     
-    # gamma_arrayがdelta_Eと同じ次元を持つように調整
+    # === デバッグ出力: gamma_arrayがdelta_Eと同じ次元を持つように調整 ===
     if len(gamma_array) != len(delta_E):
+        print(f"  [DEBUG] gamma_array長さ={len(gamma_array)}, delta_E長さ={len(delta_E)}")
         if len(gamma_array) > len(delta_E):
             gamma_array = gamma_array[:len(delta_E)]
+            print(f"  [DEBUG] gamma_arrayを切り詰めました: 長さ={len(gamma_array)}")
         else:
             gamma_array = np.pad(gamma_array, (0, len(delta_E) - len(gamma_array)), 'edge')
+            print(f"  [DEBUG] gamma_arrayを拡張しました: 長さ={len(gamma_array)}")
     
     # 数値的安定性の向上
     numerator = delta_pop * transition_strength
@@ -552,17 +575,20 @@ def fit_single_temperature_cavity_modes(dataset: Dict[str, Any]) -> Dict[str, fl
     return result
 
 class TemperatureMagneticModelOp(Op):
-    """温度依存の低周波領域の磁気パラメータを推定するためのPyMC Op。"""
+    """温度依存の低周波領域の磁気パラメータを推定するためのPyMC Op（温度依存gamma対応）。"""
     def __init__(self, datasets: List[Dict[str, Any]], temperature_specific_params: Dict[float, Dict[str, float]], model_type: str):
         self.datasets = datasets
         self.temperature_specific_params = temperature_specific_params
         self.model_type = model_type
-        self.itypes = [pt.dscalar, pt.dvector, pt.dscalar, pt.dscalar, pt.dscalar]
+        self.temp_list = sorted(list(set([d['temperature'] for d in datasets])))
+        # 温度依存gammaに対応するためinputタイプを拡張
+        self.itypes = [pt.dscalar, pt.dvector, pt.dscalar, pt.dscalar, pt.dscalar]  # a_scale, gamma_concat, g_factor, B4, B6
         self.otypes = [pt.dvector]
     
     def perform(self, node, inputs, output_storage):
-        a_scale, gamma, g_factor, B4, B6 = inputs
+        a_scale, gamma_concat, g_factor, B4, B6 = inputs
         full_predicted_y = []
+        gamma_start_idx = 0
         
         for data in self.datasets:
             # 該当する温度の固定パラメータを取得
@@ -575,8 +601,13 @@ class TemperatureMagneticModelOp(Op):
                 d_fixed = globals()['d_fixed']
                 eps_bg_fixed = eps_bg_init
             
+            # 温度に対応するgamma部分を抽出（7つの遷移）
+            gamma_end_idx = gamma_start_idx + 7
+            gamma_for_temp = gamma_concat[gamma_start_idx:gamma_end_idx]
+            gamma_start_idx = gamma_end_idx
+            
             H = get_hamiltonian(data['b_field'], g_factor, B4, B6)
-            chi_raw = calculate_susceptibility(data['omega'], H, data['temperature'], gamma)
+            chi_raw = calculate_susceptibility(data['omega'], H, data['temperature'], gamma_for_temp)
             G0 = a_scale * mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
             chi = G0 * chi_raw
             
@@ -594,7 +625,7 @@ class TemperatureMagneticModelOp(Op):
 def run_temperature_bayesian_fit(datasets: List[Dict[str, Any]], 
                                 temperature_specific_params: Dict[float, Dict[str, float]], 
                                 prior_magnetic_params: Optional[Dict[str, float]] = None, 
-                                model_type: str = 'H_form') -> az.InferenceData:
+                                model_type: str = 'H_form') -> Optional[az.InferenceData]:
     """温度毎の固定eps_bgを使用してベイズ推定を実行する"""
     print(f"\n--- 温度別固定eps_bgによるベイズ推定 (モデル: {model_type}) ---")
     trans_observed = np.concatenate([d['transmittance'] for d in datasets])
@@ -620,11 +651,44 @@ def run_temperature_bayesian_fit(datasets: List[Dict[str, Any]],
             B6 = pm.Normal('B6', mu=B6_init, sigma=abs(B6_init)*0.3 + 0.00005)
             print("初回のデフォルト事前分布を使用")
         
-        # γパラメータの事前分布（ポラリトン形成領域改善のため柔軟性向上）
-        log_gamma_mu = pm.Normal('log_gamma_mu', mu=np.log(gamma_init), sigma=0.8)  # 幅を広げる
-        log_gamma_sigma = pm.HalfNormal('log_gamma_sigma', sigma=0.5)  # 遷移間の変動を大きく
-        log_gamma_offset = pm.Normal('log_gamma_offset', mu=0, sigma=0.5, shape=7)  # 個別変動を大きく
-        gamma = pm.Deterministic('gamma', pt.exp(log_gamma_mu + log_gamma_offset * log_gamma_sigma))
+        # γパラメータの温度依存性実装（改良版）
+        # 各温度条件での基準温度（ベースライン）
+        base_temp = 4.0  # K
+        temp_list = sorted(list(set([d['temperature'] for d in datasets])))
+        n_temps = len(temp_list)
+        
+        # 基準温度での基本gamma分布
+        log_gamma_mu_base = pm.Normal('log_gamma_mu_base', mu=np.log(gamma_init), sigma=0.8)
+        log_gamma_sigma_base = pm.HalfNormal('log_gamma_sigma_base', sigma=0.5)
+        log_gamma_offset_base = pm.Normal('log_gamma_offset_base', mu=0, sigma=0.5, shape=7)
+        
+        # 温度依存性パラメータ（温度増加に伴うgammaの変化率）
+        temp_gamma_slope = pm.Normal('temp_gamma_slope', mu=0.001, sigma=0.0005)  # 温度依存性係数
+        temp_gamma_nonlinear = pm.Normal('temp_gamma_nonlinear', mu=0.0, sigma=0.00001)  # 非線形項
+        
+        # 各温度でのgamma計算
+        gamma_all_temps = []
+        for temp in temp_list:
+            # 温度差に基づく補正項
+            temp_diff = temp - base_temp
+            # 線形 + 非線形の温度依存性
+            temp_correction = temp_gamma_slope * temp_diff + temp_gamma_nonlinear * temp_diff**2
+            
+            # 各温度での修正log_gamma_mu
+            log_gamma_mu_temp = log_gamma_mu_base + temp_correction
+            
+            # 各温度でのgamma値を計算
+            gamma_temp = pt.exp(log_gamma_mu_temp + log_gamma_offset_base * log_gamma_sigma_base)
+            gamma_all_temps.append(gamma_temp)
+        
+        # 温度別データセットに対応するgammaを選択
+        gamma_final = []
+        for dataset in datasets:
+            temp_idx = temp_list.index(dataset['temperature'])
+            gamma_final.append(gamma_all_temps[temp_idx])
+        
+        # 最終的なgamma（全データセットの結合）
+        gamma = pt.concatenate(gamma_final, axis=0)
         
         op = TemperatureMagneticModelOp(datasets, temperature_specific_params, model_type)
         mu = op(a_scale, gamma, g_factor, B4, B6)
@@ -672,30 +736,6 @@ def run_temperature_bayesian_fit(datasets: List[Dict[str, Any]],
                     print("⚠️ 警告: ess_bulk < 400 - 有効サンプルサイズが不足")
                 if min_ess_tail < 400:
                     print("⚠️ 警告: ess_tail < 400 - 分布の裾の推定が不安定")
-                
-                # 収束が悪い場合は追加サンプリング
-                print("\n収束が不十分なため、追加サンプリングを実行します...")
-                trace_extended = pm.sample(2000, 
-                                         tune=1000,
-                                         chains=4,
-                                         cores=min(cpu_count, 4),
-                                         target_accept=0.95,
-                                         trace=trace,
-                                         idata_kwargs={"log_likelihood": True},
-                                         random_seed=43,
-                                         progressbar=True)
-                trace = trace_extended
-                
-                # 再度収束診断
-                print("\n--- 追加サンプリング後の収束診断 ---")
-                summary_extended = az.summary(trace, var_names=['a_scale', 'g_factor', 'B4', 'B6'])
-                max_rhat_ext = summary_extended['r_hat'].max()
-                min_ess_bulk_ext = summary_extended['ess_bulk'].min()
-                min_ess_tail_ext = summary_extended['ess_tail'].min()
-                
-                print(f"最大 r_hat: {max_rhat_ext:.4f}")
-                print(f"最小 ess_bulk: {min_ess_bulk_ext:.0f}")
-                print(f"最小 ess_tail: {min_ess_tail_ext:.0f}")
             else:
                 print("✅ 収束診断: 良好")
                 
@@ -729,25 +769,51 @@ def run_temperature_bayesian_fit(datasets: List[Dict[str, Any]],
         with model:
             if "log_likelihood" not in trace:
                 trace = pm.compute_log_likelihood(trace)
+                # === 型アノテーション修正: 戻り値の型一貫性確保 ===
+                if not isinstance(trace, az.InferenceData):
+                    # Datasetの場合はInferenceDataに変換（代替方法）
+                    print(f"  [TYPE_SAFE] 型変換が必要: {type(trace)}")
                 assert isinstance(trace, az.InferenceData)
     
     print("----------------------------------------------------")
     print("▶ 温度依存ベイズ推定結果 (サマリー):")
-    summary = az.summary(trace, var_names=['a_scale', 'g_factor', 'B4', 'B6', 'gamma'])
-    print(summary)
+    # 温度依存gamma実装により変数名を修正
+    try:
+        summary = az.summary(trace, var_names=['a_scale', 'g_factor', 'B4', 'B6', 'log_gamma_mu_base', 'temp_gamma_slope', 'temp_gamma_nonlinear'])
+        print(summary)
+    except KeyError as e:
+        print(f"サマリー表示エラー: {e}")
+        # 利用可能な変数名を表示（型安全版）
+        try:
+            print("利用可能な変数:", list(trace["posterior"].keys()))
+        except Exception:
+            print("posterior データにアクセスできませんでした")
     print("----------------------------------------------------")
     return trace
 
 def extract_bayesian_parameters(trace: az.InferenceData) -> Dict[str, float]:
-    """ベイズ推定結果から平均パラメータを抽出"""
+    """ベイズ推定結果から平均パラメータを抽出（温度依存gamma対応）"""
     posterior = trace["posterior"]
-    return {
-        'a_scale': float(posterior['a_scale'].mean()),
-        'g_factor': float(posterior['g_factor'].mean()),
-        'B4': float(posterior['B4'].mean()),
-        'B6': float(posterior['B6'].mean()),
-        'G0': float(posterior['a_scale'].mean() * mu0 * N_spin * (posterior['g_factor'].mean() * muB)**2 / (2 * hbar))
+    a_scale_mean = posterior['a_scale'].mean().item()
+    g_factor_mean = posterior['g_factor'].mean().item()
+    result = {
+        'a_scale': a_scale_mean,
+        'g_factor': g_factor_mean,
+        'B4': posterior['B4'].mean().item(),
+        'B6': posterior['B6'].mean().item(),
+        'G0': a_scale_mean * mu0 * N_spin * (g_factor_mean * muB)**2 / (2 * hbar)
     }
+    
+    # 温度依存gammaパラメータも追加
+    try:
+        result['log_gamma_mu_base'] = posterior['log_gamma_mu_base'].mean().item()
+        result['temp_gamma_slope'] = posterior['temp_gamma_slope'].mean().item()
+        result['temp_gamma_nonlinear'] = posterior['temp_gamma_nonlinear'].mean().item()
+    except KeyError:
+        # 旧版gammaパラメータとの互換性
+        pass
+    
+    return result
 
 def load_data_full_range_temperature(file_path: str, sheet_name: str) -> List[Dict[str, Any]]:
     """全周波数範囲の温度依存データを読み込む。"""
@@ -777,7 +843,7 @@ def plot_temperature_results(all_datasets: List[Dict[str, Any]],
                            temperature_specific_params: Dict[float, Dict[str, float]], 
                            bayesian_trace: az.InferenceData,
                            model_type: str = 'H_form',
-                           n_samples: int = 100):
+                           n_samples: int = 200):
     """温度依存フィッティング結果を95%信用区間と共に可視化する"""
     print(f"\n--- 温度依存フィッティング結果を可視化中 ({model_type}) ---")
     
@@ -786,7 +852,14 @@ def plot_temperature_results(all_datasets: List[Dict[str, Any]],
     mean_g_factor = float(posterior['g_factor'].mean())
     mean_B4 = float(posterior['B4'].mean())
     mean_B6 = float(posterior['B6'].mean())
-    mean_gamma = posterior['gamma'].mean().values.flatten()
+    
+    # 温度依存gammaパラメータの平均値を取得
+    mean_log_gamma_mu_base = float(posterior['log_gamma_mu_base'].mean())
+    mean_temp_gamma_slope = float(posterior['temp_gamma_slope'].mean())
+    mean_temp_gamma_nonlinear = float(posterior['temp_gamma_nonlinear'].mean())
+    mean_log_gamma_sigma_base = float(posterior['log_gamma_sigma_base'].mean())
+    mean_log_gamma_offset_base = posterior['log_gamma_offset_base'].mean().values
+    
     G0 = mean_a_scale * mu0 * N_spin * (mean_g_factor * muB)**2 / (2 * hbar)
     
     num_conditions = len(all_datasets)
@@ -822,7 +895,21 @@ def plot_temperature_results(all_datasets: List[Dict[str, Any]],
             g_factor_sample = float(posterior['g_factor'].isel(chain=chain_idx, draw=draw_idx))
             B4_sample = float(posterior['B4'].isel(chain=chain_idx, draw=draw_idx))
             B6_sample = float(posterior['B6'].isel(chain=chain_idx, draw=draw_idx))
-            gamma_sample = posterior['gamma'].isel(chain=chain_idx, draw=draw_idx).values.flatten()
+            
+            # 該当温度のgamma配列を温度依存パラメータから計算
+            log_gamma_mu_base_sample = float(posterior['log_gamma_mu_base'].isel(chain=chain_idx, draw=draw_idx))
+            temp_gamma_slope_sample = float(posterior['temp_gamma_slope'].isel(chain=chain_idx, draw=draw_idx))
+            temp_gamma_nonlinear_sample = float(posterior['temp_gamma_nonlinear'].isel(chain=chain_idx, draw=draw_idx))
+            log_gamma_sigma_base_sample = float(posterior['log_gamma_sigma_base'].isel(chain=chain_idx, draw=draw_idx))
+            log_gamma_offset_base_sample = posterior['log_gamma_offset_base'].isel(chain=chain_idx, draw=draw_idx).values
+            
+            base_temp = 4.0
+            temp_diff = temperature - base_temp
+            log_gamma_mu_temp_sample = (log_gamma_mu_base_sample + 
+                                      temp_gamma_slope_sample * temp_diff + 
+                                      temp_gamma_nonlinear_sample * temp_diff**2)
+            gamma_sample = np.exp(log_gamma_mu_temp_sample + 
+                                log_gamma_offset_base_sample * log_gamma_sigma_base_sample)
             
             H_sample = get_hamiltonian(B_FIXED, g_factor_sample, B4_sample, B6_sample)
             chi_raw_sample = calculate_susceptibility(omega_plot, H_sample, temperature, gamma_sample)
@@ -842,13 +929,33 @@ def plot_temperature_results(all_datasets: List[Dict[str, Any]],
         mean_pred = np.mean(predictions, axis=0)
         ci_lower, ci_upper = np.percentile(predictions, [2.5, 97.5], axis=0)
         
+        # 平均パラメータでの予測計算も追加
+        base_temp = 4.0
+        temp_diff = temperature - base_temp
+        log_gamma_mu_temp_mean = (mean_log_gamma_mu_base + 
+                                 mean_temp_gamma_slope * temp_diff + 
+                                 mean_temp_gamma_nonlinear * temp_diff**2)
+        gamma_mean = np.exp(log_gamma_mu_temp_mean + 
+                           mean_log_gamma_offset_base * mean_log_gamma_sigma_base)
+        
+        H_mean = get_hamiltonian(B_FIXED, mean_g_factor, mean_B4, mean_B6)
+        chi_raw_mean = calculate_susceptibility(omega_plot, H_mean, temperature, gamma_mean)
+        chi_mean = G0 * chi_raw_mean
+        
+        if model_type == 'H_form':
+            mu_r_mean = 1 + chi_mean
+        else:  # B_form
+            mu_r_mean = 1 / (1 - chi_mean)
+        
+        pred_mean = calculate_normalized_transmission(omega_plot, mu_r_mean, d_fixed, eps_bg_fixed)
+        
         # 実験データの正規化
         min_exp, max_exp = data['transmittance_full'].min(), data['transmittance_full'].max()
         trans_norm_full = (data['transmittance_full'] - min_exp) / (max_exp - min_exp)
         
-        # プロット
+        # プロット（平均パラメータでの予測を使用）
         color = 'red' if model_type == 'H_form' else 'blue'
-        ax.plot(freq_plot, mean_pred, color=color, lw=2.5, label=f'平均予測 ({model_type})')
+        ax.plot(freq_plot, pred_mean, color=color, lw=2.5, label=f'平均予測 ({model_type})')
         ax.fill_between(freq_plot, ci_lower, ci_upper, color=color, alpha=0.3, label='95%信用区間')
         ax.scatter(data['frequency'], trans_norm_full, color='black', s=25, alpha=0.6, label='実験データ')
         
@@ -874,7 +981,7 @@ def plot_temperature_results(all_datasets: List[Dict[str, Any]],
 def plot_combined_temperature_model_comparison(all_datasets: List[Dict[str, Any]], 
                                              temperature_specific_params: Dict[float, Dict[str, float]], 
                                              traces: Dict[str, az.InferenceData], 
-                                             n_samples: int = 100):
+                                             n_samples: int = 200):
     """H_formとB_formを2行2列レイアウトで統合比較プロット"""
     print("\n--- H_form と B_form の温度依存統合比較プロット (2x2レイアウト) ---")
     
@@ -892,7 +999,14 @@ def plot_combined_temperature_model_comparison(all_datasets: List[Dict[str, Any]
         mean_g_factor = float(posterior['g_factor'].mean())
         mean_B4 = float(posterior['B4'].mean())
         mean_B6 = float(posterior['B6'].mean())
-        mean_gamma = posterior['gamma'].mean().values.flatten()
+        
+        # 温度依存gammaパラメータの平均値を取得
+        mean_log_gamma_mu_base = float(posterior['log_gamma_mu_base'].mean())
+        mean_temp_gamma_slope = float(posterior['temp_gamma_slope'].mean())
+        mean_temp_gamma_nonlinear = float(posterior['temp_gamma_nonlinear'].mean())
+        mean_log_gamma_sigma_base = float(posterior['log_gamma_sigma_base'].mean())
+        mean_log_gamma_offset_base = posterior['log_gamma_offset_base'].mean().values
+        
         G0 = mean_a_scale * mu0 * N_spin * (mean_g_factor * muB)**2 / (2 * hbar)
         
         model_results[model_type] = {
@@ -900,7 +1014,13 @@ def plot_combined_temperature_model_comparison(all_datasets: List[Dict[str, Any]
                 'a_scale': mean_a_scale, 'g_factor': mean_g_factor, 
                 'B4': mean_B4, 'B6': mean_B6, 'G0': G0
             },
-            'gamma': mean_gamma
+            'temp_gamma_params': {
+                'log_gamma_mu_base': mean_log_gamma_mu_base,
+                'temp_gamma_slope': mean_temp_gamma_slope,
+                'temp_gamma_nonlinear': mean_temp_gamma_nonlinear,
+                'log_gamma_sigma_base': mean_log_gamma_sigma_base,
+                'log_gamma_offset_base': mean_log_gamma_offset_base
+            }
         }
     
     # 4つの温度条件をプロット
@@ -936,25 +1056,134 @@ def plot_combined_temperature_model_comparison(all_datasets: List[Dict[str, Any]
         
         for model_type, results in model_results.items():
             mean_params = results['mean_params']
-            gamma_array = results['gamma']
+            temp_gamma_params = results['temp_gamma_params']
+            trace = traces[model_type]
+            posterior = trace["posterior"]
             
-            # 磁気感受率と透過率の計算
-            H = get_hamiltonian(B_FIXED, mean_params['g_factor'], mean_params['B4'], mean_params['B6'])
-            chi_raw = calculate_susceptibility(omega_plot, H, temperature, gamma_array)
-            chi = mean_params['G0'] * chi_raw
+            # 該当温度のgamma配列を計算
+            base_temp = 4.0
+            temp_diff = temperature - base_temp
+            log_gamma_mu_temp = (temp_gamma_params['log_gamma_mu_base'] + 
+                               temp_gamma_params['temp_gamma_slope'] * temp_diff + 
+                               temp_gamma_params['temp_gamma_nonlinear'] * temp_diff**2)
+            gamma_array = np.exp(log_gamma_mu_temp + 
+                               temp_gamma_params['log_gamma_offset_base'] * temp_gamma_params['log_gamma_sigma_base'])
+            
+            # 95%信用区間の計算
+            total_samples = posterior['a_scale'].size
+            indices = np.random.choice(total_samples, min(n_samples, total_samples), replace=False)
+            
+            predictions = []
+            for idx in indices:
+                # サンプルされたパラメータ
+                a_scale_sample = float(posterior['a_scale'].values.flatten()[idx])
+                g_factor_sample = float(posterior['g_factor'].values.flatten()[idx])
+                B4_sample = float(posterior['B4'].values.flatten()[idx])
+                B6_sample = float(posterior['B6'].values.flatten()[idx])
+                
+                # 該当温度のgammaを計算
+                log_gamma_mu_base_sample = float(posterior['log_gamma_mu_base'].values.flatten()[idx])
+                temp_gamma_slope_sample = float(posterior['temp_gamma_slope'].values.flatten()[idx])
+                temp_gamma_nonlinear_sample = float(posterior['temp_gamma_nonlinear'].values.flatten()[idx])
+                log_gamma_sigma_base_sample = float(posterior['log_gamma_sigma_base'].values.flatten()[idx])
+                
+                # === インデックス安全性: log_gamma_offset_baseの配列アクセス防護 ===
+                log_gamma_offset_base_flat = posterior['log_gamma_offset_base'].values.reshape(-1, 7)
+                if idx < log_gamma_offset_base_flat.shape[0]:
+                    log_gamma_offset_base_sample = log_gamma_offset_base_flat[idx]
+                else:
+                    # 範囲外の場合は循環インデックスを使用
+                    safe_idx = idx % log_gamma_offset_base_flat.shape[0]
+                    log_gamma_offset_base_sample = log_gamma_offset_base_flat[safe_idx]
+                    print(f"  [INDEX_SAFE] インデックス範囲外 idx={idx}, shape={log_gamma_offset_base_flat.shape[0]}, 安全インデックス={safe_idx}を使用")
+                
+                log_gamma_mu_temp_sample = (log_gamma_mu_base_sample + 
+                                          temp_gamma_slope_sample * temp_diff + 
+                                          temp_gamma_nonlinear_sample * temp_diff**2)
+                gamma_sample = np.exp(log_gamma_mu_temp_sample + 
+                                    log_gamma_offset_base_sample * log_gamma_sigma_base_sample)
+                
+                # === 型チェック強化: gamma_sampleが確実に7要素の配列になるように修正 ===
+                if np.isscalar(gamma_sample):
+                    gamma_sample = np.full(7, gamma_sample)
+                    print(f"  [TYPE_SAFE] gamma_sampleが単一値でした。7要素配列に変換 (温度{temperature}K, idx={idx})")
+                elif gamma_sample.ndim == 0:
+                    gamma_sample = np.full(7, float(gamma_sample))
+                    print(f"  [TYPE_SAFE] gamma_sampleが0次元配列でした。7要素配列に変換 (温度{temperature}K, idx={idx})")
+                elif len(gamma_sample) != 7:
+                    original_len = len(gamma_sample)
+                    if len(gamma_sample) > 7:
+                        gamma_sample = gamma_sample[:7]
+                    else:
+                        gamma_sample = np.pad(gamma_sample, (0, 7 - len(gamma_sample)), 'edge')
+                    print(f"  [TYPE_SAFE] gamma_sampleサイズ調整: {original_len} → 7 (温度{temperature}K, idx={idx})")
+                
+                G0_sample = a_scale_sample * mu0 * N_spin * (g_factor_sample * muB)**2 / (2 * hbar)
+                
+                # 予測計算
+                H_sample = get_hamiltonian(B_FIXED, g_factor_sample, B4_sample, B6_sample)
+                chi_raw_sample = calculate_susceptibility(omega_plot, H_sample, temperature, gamma_sample)
+                chi_sample = G0_sample * chi_raw_sample
+                
+                if model_type == 'H_form':
+                    mu_r_sample = 1 + chi_sample
+                else:  # B_form
+                    mu_r_sample = 1 / (1 - chi_sample)
+                
+                predicted_trans_sample = calculate_normalized_transmission(omega_plot, mu_r_sample, d_fixed, eps_bg_fixed)
+                predictions.append(predicted_trans_sample)
+            
+            # 統計的要約
+            predictions = np.array(predictions)
+            mean_prediction = np.mean(predictions, axis=0)
+            ci_lower = np.percentile(predictions, 2.5, axis=0)
+            ci_upper = np.percentile(predictions, 97.5, axis=0)
+            
+            # 平均パラメータでの予測線も計算
+            # 該当温度のgamma配列を温度依存パラメータから計算
+            base_temp = 4.0
+            temp_diff = temperature - base_temp
+            log_gamma_mu_temp = (temp_gamma_params['log_gamma_mu_base'] + 
+                               temp_gamma_params['temp_gamma_slope'] * temp_diff + 
+                               temp_gamma_params['temp_gamma_nonlinear'] * temp_diff**2)
+            gamma_array = np.exp(log_gamma_mu_temp + 
+                               temp_gamma_params['log_gamma_offset_base'] * temp_gamma_params['log_gamma_sigma_base'])
+            
+            # === 型チェック強化: 平均gamma_arrayが確実に7要素の配列になるように修正 ===
+            if np.isscalar(gamma_array):
+                gamma_array = np.full(7, gamma_array)
+                print(f"  [TYPE_SAFE] 平均gamma_arrayが単一値でした。7要素配列に変換 (温度{temperature}K, {model_type})")
+            elif gamma_array.ndim == 0:
+                gamma_array = np.full(7, float(gamma_array))
+                print(f"  [TYPE_SAFE] 平均gamma_arrayが0次元配列でした。7要素配列に変換 (温度{temperature}K, {model_type})")
+            elif len(gamma_array) != 7:
+                original_len = len(gamma_array)
+                if len(gamma_array) > 7:
+                    gamma_array = gamma_array[:7]
+                else:
+                    gamma_array = np.pad(gamma_array, (0, 7 - len(gamma_array)), 'edge')
+                print(f"  [TYPE_SAFE] 平均gamma_arrayサイズ調整: {original_len} → 7 (温度{temperature}K, {model_type})")
+            
+            H_mean = get_hamiltonian(B_FIXED, mean_params['g_factor'], mean_params['B4'], mean_params['B6'])
+            chi_raw_mean = calculate_susceptibility(omega_plot, H_mean, temperature, gamma_array)
+            chi_mean = mean_params['G0'] * chi_raw_mean
             
             if model_type == 'H_form':
-                mu_r = 1 + chi  # H_form
+                mu_r_mean = 1 + chi_mean
             else:  # B_form
-                mu_r = 1 / (1 - chi)  # B_form
+                mu_r_mean = 1 / (1 - chi_mean)
             
-            predicted_trans = calculate_normalized_transmission(omega_plot, mu_r, d_fixed, eps_bg_fixed)
+            predicted_trans_mean = calculate_normalized_transmission(omega_plot, mu_r_mean, d_fixed, eps_bg_fixed)
             
-            # プロット
+            # 平均値の予測線（平均パラメータから計算）
             color = colors[model_type]
             line_style = line_styles[model_type]
-            ax.plot(freq_plot, predicted_trans, color=color, linestyle=line_style, 
+            ax.plot(freq_plot, predicted_trans_mean, color=color, linestyle=line_style, 
                    linewidth=3, label=f'{model_type}予測', alpha=0.9)
+            
+            # 95%信用区間
+            ax.fill_between(freq_plot, ci_lower, ci_upper, color=color, alpha=0.2, 
+                           label=f'{model_type} 95%信用区間' if i == 0 else None)
         
         # 低周波/高周波領域の境界線
         ax.axvline(x=LOW_FREQUENCY_CUTOFF, color='purple', linestyle=':', linewidth=2, alpha=0.8, 
@@ -1169,110 +1398,6 @@ def plot_model_selection_results_temperature(traces: Dict[str, az.InferenceData]
     else:
         print("❌ モデル比較に十分なデータがありません")
 
-if __name__ == '__main__':
-    print("\n--- 温度依存ベイズ推定解析を開始します ---")
-    
-    # データ読み込み
-    file_path = "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_Temperature.xlsx"
-    sheet_name = 'Corrected Data'
-    all_data_raw = load_data_full_range_temperature(file_path, sheet_name)
-    split_data = load_temperature_data(file_path, sheet_name, 
-                                     low_cutoff=0.361505,   # 低周波領域: [~, 0.361505THz]
-                                     high_cutoff=0.45)   # 高周波領域: [0.45THz, ~]
-    
-    # Step 1: 各温度で独立に高周波フィッティング
-    print("\n=== Step 1: 各温度での独立高周波フィッティング ===")
-    temperature_specific_params = {}
-    
-    for dataset in split_data['high_freq']:
-        result = fit_single_temperature_cavity_modes(dataset)
-        if result:
-            temperature_specific_params[result['temperature']] = result
-    
-    if not temperature_specific_params:
-        print("❌ 高周波フィッティングに失敗しました。プログラムを終了します。")
-        exit()
-    
-    print("\n高周波フィッティング結果:")
-    for temp, params in sorted(temperature_specific_params.items()):
-        print(f"  {temp} K: d = {params['d']*1e6:.2f} μm, eps_bg = {params['eps_bg']:.4f}")
-    
-    # Step 2: H_formとB_formの両方でベイズ推定
-    print("\n=== Step 2: H_form と B_form のベイズ推定 ===")
-    traces = {}
-    
-    for model_type in ['H_form', 'B_form']:
-        print(f"\n--- {model_type} モデルでベイズ推定実行 ---")
-        try:
-            trace = run_temperature_bayesian_fit(
-                split_data['low_freq'], 
-                temperature_specific_params, 
-                prior_magnetic_params=None, 
-                model_type=model_type
-            )
-            traces[model_type] = trace
-            
-            # 個別の結果プロット
-            plot_temperature_results(all_data_raw, temperature_specific_params, trace, model_type)
-            
-        except Exception as e:
-            print(f"❌ {model_type} モデルの実行に失敗: {e}")
-            continue
-    
-    if traces:
-        # H_form と B_form の統合比較プロット（2×2レイアウト）
-        if len(traces) >= 2:
-            print("\n--- H_form と B_form の統合比較プロット（2×2レイアウト）作成中 ---")
-            plot_combined_temperature_model_comparison(all_data_raw, temperature_specific_params, traces)
-        
-        # 温度依存性プロット
-        best_trace = traces.get('H_form', traces.get('B_form', None))
-        if best_trace:
-            plot_temperature_dependencies(temperature_specific_params, best_trace)
-        
-        # モデル比較分析
-        plot_model_selection_results_temperature(traces)
-        # 温度依存性のプロット
-        # 最初に成功したtraceを使用
-        first_trace = list(traces.values())[0]
-        plot_temperature_dependencies(temperature_specific_params, first_trace)
-        
-        # モデル比較（複数のモデルがある場合）
-        if len(traces) >= 2:
-            plot_model_selection_results_temperature(traces)
-            
-            print("\n=== モデル比較 ===")
-            try:
-                compare_result = az.compare(traces, ic="loo")
-                print(compare_result)
-                
-                # WAICによる比較も実行
-                print("\n=== WAIC比較 ===")
-                for model_name, trace in traces.items():
-                    try:
-                        waic_result = az.waic(trace, pointwise=True)
-                        print(f"{model_name}: WAIC = {waic_result.elpd_waic:.2f} ± {waic_result.se:.2f}")
-                    except Exception as e:
-                        print(f"{model_name}: WAIC計算に失敗 - {e}")
-                        
-            except Exception as e:
-                print(f"モデル比較に失敗: {e}")
-        
-        # 最終結果のサマリー
-        print("\n=== 最終結果サマリー ===")
-        print("温度別光学パラメータ:")
-        for temp, params in sorted(temperature_specific_params.items()):
-            print(f"  {temp} K: eps_bg = {params['eps_bg']:.4f}")
-        print(f"膜厚: {d_fixed*1e6:.2f} μm （全温度で固定）")
-        
-        print("\n磁気パラメータ (ベイズ推定):")
-        final_magnetic_params = extract_bayesian_parameters(first_trace)
-        for param, value in final_magnetic_params.items():
-            if param == 'G0':
-                print(f"  {param} = {value:.3e}")
-            else:
-                print(f"  {param} = {value:.6f}")
-        
 def run_iterative_temperature_bayesian_workflow():
     """two_step_iterative_fitting.pyを参考にした反復的温度依存ベイズ推定ワークフロー"""
     print("🚀 温度依存反復ベイズ推定ワークフローを開始します")
@@ -1438,7 +1563,6 @@ def run_iterative_temperature_bayesian_workflow():
                 print(f"  {param} = {value:.3e}")
             else:
                 print(f"  {param} = {value:.6f}")
-                print(f"  {param} = {value:.6f}")
     
     print("🎉 温度依存反復ベイズ推定ワークフローが完了しました。")
     
@@ -1459,7 +1583,8 @@ def run_iterative_temperature_bayesian_workflow():
                 model_type='H_form',
                 prior_magnetic_params=current_magnetic_params
             )
-            final_traces['H_form'] = h_form_trace
+            if h_form_trace is not None:
+                final_traces['H_form'] = h_form_trace
         except Exception as e:
             print(f"❌ H_form解析に失敗: {e}")
         
