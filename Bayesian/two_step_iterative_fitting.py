@@ -11,6 +11,8 @@ import os
 import pathlib
 import re
 import warnings
+import csv
+from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from scipy.signal import find_peaks
 from scipy.spatial import KDTree
@@ -29,7 +31,7 @@ if __name__ == "__main__":
     except ImportError:
         print("警告: japanize_matplotlib が見つかりません。")
     plt.rcParams['figure.dpi'] = 120
-    IMAGE_DIR = pathlib.Path(__file__).parent / "iterative_analysis_results_2"
+    IMAGE_DIR = pathlib.Path(__file__).parent / "iterative_analysis_results_corrected_bg"
     IMAGE_DIR.mkdir(exist_ok=True)
     print(f"画像は '{IMAGE_DIR.resolve()}' に保存されます。")
 
@@ -1399,9 +1401,10 @@ if __name__ == '__main__':
     print("\n--- 反復的2段階フィッティング解析を開始します ---")
     
     # データ読み込み（新しい3区間分割を使用）
-    file_path = "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\Circular_Polarization_B_Field.xlsx"
-    all_data_raw = load_data_full_range(file_path, 'Sheet2')
-    split_data = load_and_split_data_three_regions(file_path, 'Sheet2', 
+    file_path = "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_B_Field.xlsx"
+    sheet_name = 'Corrected Data'
+    all_data_raw = load_data_full_range(file_path, sheet_name)
+    split_data = load_and_split_data_three_regions(file_path, sheet_name, 
                                                    low_cutoff=0.378,   # 低周波領域: [~, 0.378THz]
                                                    high_cutoff=0.45)   # 高周波領域: [0.45THz, ~]
     
