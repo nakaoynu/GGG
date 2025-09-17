@@ -31,7 +31,7 @@ if __name__ == "__main__":
     except ImportError:
         print("警告: japanize_matplotlib が見つかりません。")
     plt.rcParams['figure.dpi'] = 120
-    IMAGE_DIR = pathlib.Path(__file__).parent / "iterative_analysis_results_corrected_bg"
+    IMAGE_DIR = pathlib.Path(__file__).parent / "B_field_iterative"
     IMAGE_DIR.mkdir(exist_ok=True)
     print(f"画像は '{IMAGE_DIR.resolve()}' に保存されます。")
 
@@ -1397,6 +1397,271 @@ def load_data_full_range(file_path: str, sheet_name: str) -> List[Dict[str, Any]
         all_datasets.append({**base_data, 'frequency': freq, 'transmittance_full': trans, 'omega': freq * 1e12 * 2 * np.pi})
     return all_datasets
 
+# --- CSV出力機能の実装 ---
+def save_peak_comparison_to_csv(all_datasets: List[Dict[str, Any]], 
+                               field_specific_params: Dict[float, Dict[str, float]], 
+                               traces: Dict[str, az.InferenceData],
+                               results_dir: str = None) -> Dict[str, str]:
+    """H形式とB形式のピーク位置の差をCSV形式で出力する"""
+    if results_dir is None:
+        results_dir = IMAGE_DIR
+    
+    print("\n--- ピーク位置比較のCSV出力 ---")
+    
+    # 結果保存ディレクトリの作成
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # 1. 詳細なピーク位置比較データ
+    detailed_data = []
+    
+    for model_type, trace in traces.items():
+        print(f"{model_type}モデルのピーク位置を解析中...")
+        
+        # ベイズ推定パラメータの抽出
+        mean_params = extract_bayesian_parameters(trace)
+        
+        for data in all_datasets:
+            b_field = data['b_field']
+            
+            # 該当磁場のeps_bg取得
+            eps_bg_fixed = field_specific_params.get(b_field, {}).get('eps_bg', eps_bg_init)
+            
+            # 予測透過率の計算
+            freq_plot = np.linspace(data['frequency'].min(), data['frequency'].max(), 1000)
+            omega_plot = freq_plot * 1e12 * 2 * np.pi
+            
+            # ハミルトニアン計算
+            H = get_hamiltonian(b_field, mean_params['g_factor'], mean_params['B4'], mean_params['B6'])
+            gamma_mean = np.full(7, gamma_init)
+            chi_raw = calculate_susceptibility(omega_plot, H, TEMPERATURE, gamma_mean)
+            chi = mean_params['G0'] * chi_raw
+            
+            if model_type == 'H_form':
+                mu_r = 1 + chi
+            else:  # B_form
+                mu_r = 1 + chi / (1 + chi)
+            
+            predicted_trans = calculate_normalized_transmission(omega_plot, mu_r, d_fixed, eps_bg_fixed)
+            
+            # 実験データの正規化
+            min_exp, max_exp = np.min(data['transmittance_full']), np.max(data['transmittance_full'])
+            trans_norm_full = (data['transmittance_full'] - min_exp) / (max_exp - min_exp) if max_exp > min_exp else np.full_like(data['transmittance_full'], 0.5)
+            
+            # ピーク検出（透過率の山 = 正のピーク）
+            try:
+                exp_peaks, _ = find_peaks(trans_norm_full, height=0.3, distance=5)
+                pred_peaks, _ = find_peaks(predicted_trans, height=0.3, distance=10)
+                
+                exp_peak_freqs = data['frequency'][exp_peaks] if len(exp_peaks) > 0 else np.array([])
+                pred_peak_freqs = freq_plot[pred_peaks] if len(pred_peaks) > 0 else np.array([])
+                
+                # ピークマッチング（最近傍法）
+                if len(exp_peak_freqs) > 0 and len(pred_peak_freqs) > 0:
+                    tree = KDTree(pred_peak_freqs.reshape(-1, 1))
+                    distances, indices = tree.query(exp_peak_freqs.reshape(-1, 1))
+                    
+                    for i, (exp_freq, dist, idx) in enumerate(zip(exp_peak_freqs, distances.flatten(), indices.flatten())):
+                        if dist < 0.1:  # 0.1 THz以内でマッチング
+                            pred_freq = pred_peak_freqs[idx]
+                            detailed_data.append({
+                                'model': model_type,
+                                'b_field_T': b_field,
+                                'peak_index': i + 1,
+                                'exp_peak_freq_THz': exp_freq,
+                                'pred_peak_freq_THz': pred_freq,
+                                'freq_difference_THz': pred_freq - exp_freq,
+                                'relative_error': abs(pred_freq - exp_freq) / exp_freq,
+                                'exp_peak_height': trans_norm_full[exp_peaks[i]],
+                                'pred_peak_height': predicted_trans[pred_peaks[idx]]
+                            })
+                        
+            except Exception as e:
+                print(f"  ピーク検出エラー ({model_type}, {b_field}T): {e}")
+    
+    # 詳細データをCSVで保存
+    detailed_df = pd.DataFrame(detailed_data)
+    detailed_csv_path = os.path.join(results_dir, 'peak_position_comparison_detailed.csv')
+    detailed_df.to_csv(detailed_csv_path, index=False, encoding='utf-8-sig')
+    print(f"  詳細ピーク比較データ: {detailed_csv_path}")
+    
+    # 2. H形式とB形式の統計比較
+    comparison_data = []
+    
+    if 'H_form' in traces and 'B_form' in traces:
+        # 磁場別の統計比較
+        b_fields = sorted(list(set([row['b_field_T'] for row in detailed_data])))
+        
+        for b_field in b_fields:
+            h_data = [row for row in detailed_data if row['model'] == 'H_form' and row['b_field_T'] == b_field]
+            b_data = [row for row in detailed_data if row['model'] == 'B_form' and row['b_field_T'] == b_field]
+            
+            if h_data and b_data:
+                h_rms = np.sqrt(np.mean([row['freq_difference_THz']**2 for row in h_data]))
+                b_rms = np.sqrt(np.mean([row['freq_difference_THz']**2 for row in b_data]))
+                h_mean = np.mean([row['freq_difference_THz'] for row in h_data])
+                b_mean = np.mean([row['freq_difference_THz'] for row in b_data])
+                
+                comparison_data.append({
+                    'b_field_T': b_field,
+                    'H_form_matched_peaks': len(h_data),
+                    'B_form_matched_peaks': len(b_data),
+                    'H_form_rms_diff_THz': h_rms,
+                    'B_form_rms_diff_THz': b_rms,
+                    'H_form_mean_diff_THz': h_mean,
+                    'B_form_mean_diff_THz': b_mean,
+                    'rms_diff_H_vs_B': abs(h_rms - b_rms),
+                    'better_model': 'H_form' if h_rms < b_rms else 'B_form'
+                })
+        
+        # モデル比較データをCSVで保存
+        comparison_df = pd.DataFrame(comparison_data)
+        comparison_csv_path = os.path.join(results_dir, 'H_vs_B_form_peak_comparison.csv')
+        comparison_df.to_csv(comparison_csv_path, index=False, encoding='utf-8-sig')
+        print(f"  H形式 vs B形式 ピーク位置比較: {comparison_csv_path}")
+        
+        # 全体サマリー
+        print(f"\n=== ピーク位置差分析結果サマリー ===")
+        if len(comparison_data) > 0:
+            print(f"解析磁場数: {len(comparison_data)}")
+            print(f"詳細データ: {len(detailed_data)} 件のピークマッチング")
+            avg_h_rms = comparison_df['H_form_rms_diff_THz'].mean()
+            avg_b_rms = comparison_df['B_form_rms_diff_THz'].mean()
+            print(f"H形式 平均RMS差: {avg_h_rms:.4f} THz")
+            print(f"B形式 平均RMS差: {avg_b_rms:.4f} THz")
+            
+            # 優位モデルの統計
+            h_wins = sum(comparison_df['better_model'] == 'H_form')
+            b_wins = sum(comparison_df['better_model'] == 'B_form')
+            print(f"ピーク位置精度: H形式={h_wins}磁場, B形式={b_wins}磁場で優位")
+    else:
+        comparison_csv_path = None
+    
+    print(f"✅ ピーク位置比較結果をCSVファイルに保存（保存先: {results_dir}）")
+    
+    return {
+        'detailed_csv': detailed_csv_path,
+        'comparison_csv': comparison_csv_path
+    }
+
+def save_fitting_parameters_to_csv(traces: Dict[str, az.InferenceData], 
+                                 field_specific_params: Dict[float, Dict[str, float]],
+                                 results_dir: str = None) -> Dict[str, str]:
+    """H形式とB形式のベイズ推定パラメータをCSV形式で保存する"""
+    if results_dir is None:
+        results_dir = IMAGE_DIR
+        
+    print("\n--- フィッティングパラメータのCSV保存 ---")
+    
+    # 結果保存ディレクトリの作成
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # 各モデルのパラメータを抽出
+    model_parameters = {}
+    
+    for model_type, trace in traces.items():
+        print(f"{model_type}モデルのパラメータを抽出中...")
+        
+        # ベイズ推定パラメータの抽出
+        bayesian_params = extract_bayesian_parameters(trace)
+        
+        # 統計情報も追加抽出
+        posterior = trace["posterior"]
+        
+        # パラメータの統計情報を詳細に取得
+        param_stats = {}
+        
+        # 基本パラメータの統計
+        for param_name in ['a_scale', 'g_factor', 'B4', 'B6']:
+            if param_name in posterior.data_vars:
+                param_data = posterior[param_name]
+                param_stats[f'{param_name}_mean'] = float(param_data.mean())
+                param_stats[f'{param_name}_std'] = float(param_data.std())
+                param_stats[f'{param_name}_hdi_3%'] = float(param_data.quantile(0.03))
+                param_stats[f'{param_name}_hdi_97%'] = float(param_data.quantile(0.97))
+        
+        # gammaパラメータの統計
+        if 'log_gamma_mu' in posterior.data_vars:
+            gamma_data = posterior['log_gamma_mu']
+            param_stats['log_gamma_mu_mean'] = float(gamma_data.mean())
+            param_stats['log_gamma_mu_std'] = float(gamma_data.std())
+            param_stats['log_gamma_mu_hdi_3%'] = float(gamma_data.quantile(0.03))
+            param_stats['log_gamma_mu_hdi_97%'] = float(gamma_data.quantile(0.97))
+        
+        if 'log_gamma_sigma' in posterior.data_vars:
+            sigma_data = posterior['log_gamma_sigma']
+            param_stats['log_gamma_sigma_mean'] = float(sigma_data.mean())
+            param_stats['log_gamma_sigma_std'] = float(sigma_data.std())
+            param_stats['log_gamma_sigma_hdi_3%'] = float(sigma_data.quantile(0.03))
+            param_stats['log_gamma_sigma_hdi_97%'] = float(sigma_data.quantile(0.97))
+        
+        # log_gamma_offset（7次元ベクトル）の統計
+        if 'log_gamma_offset' in posterior.data_vars:
+            offset_data = posterior['log_gamma_offset']
+            for i in range(7):
+                param_stats[f'log_gamma_offset_{i}_mean'] = float(offset_data[..., i].mean())
+                param_stats[f'log_gamma_offset_{i}_std'] = float(offset_data[..., i].std())
+                param_stats[f'log_gamma_offset_{i}_hdi_3%'] = float(offset_data[..., i].quantile(0.03))
+                param_stats[f'log_gamma_offset_{i}_hdi_97%'] = float(offset_data[..., i].quantile(0.97))
+        
+        # 導出パラメータ（G0）を追加
+        param_stats['G0_mean'] = bayesian_params.get('G0', 0)
+        
+        # 不確実性評価指標
+        if 'sigma' in posterior.data_vars:
+            sigma_data = posterior['sigma']
+            param_stats['observation_noise_sigma_mean'] = float(sigma_data.mean())
+            param_stats['observation_noise_sigma_std'] = float(sigma_data.std())
+        
+        model_parameters[model_type] = param_stats
+    
+    # CSV形式での保存
+    # 1. 各モデル別の詳細パラメータファイル
+    saved_files = {}
+    
+    for model_type, params in model_parameters.items():
+        df_model = pd.DataFrame(list(params.items()), columns=['Parameter', 'Value'])
+        model_csv_path = os.path.join(results_dir, f'fitting_parameters_{model_type.lower()}.csv')
+        df_model.to_csv(model_csv_path, index=False, encoding='utf-8-sig')
+        print(f"  {model_type}パラメータを保存: {model_csv_path}")
+        saved_files[f'{model_type}_params'] = model_csv_path
+    
+    # 2. モデル比較用の統合ファイル（主要パラメータのみ）
+    comparison_data = []
+    main_params = ['a_scale_mean', 'g_factor_mean', 'B4_mean', 'B6_mean', 'G0_mean', 
+                   'log_gamma_mu_mean', 'log_gamma_sigma_mean', 'observation_noise_sigma_mean']
+    
+    for model_type, params in model_parameters.items():
+        row = {'Model': model_type}
+        for param in main_params:
+            row[param] = params.get(param, np.nan)
+        comparison_data.append(row)
+    
+    df_comparison = pd.DataFrame(comparison_data)
+    comparison_csv_path = os.path.join(results_dir, 'model_comparison_parameters.csv')
+    df_comparison.to_csv(comparison_csv_path, index=False, encoding='utf-8-sig')
+    print(f"  モデル比較パラメータを保存: {comparison_csv_path}")
+    saved_files['model_comparison'] = comparison_csv_path
+    
+    # 3. 磁場別光学パラメータ（eps_bg）の保存
+    field_data = []
+    for b_field, params in sorted(field_specific_params.items()):
+        field_data.append({
+            'B_Field_T': b_field,
+            'eps_bg': params.get('eps_bg', np.nan),
+            'Fixed_thickness_um': d_fixed * 1e6,  # μm単位
+            'Temperature_K': TEMPERATURE
+        })
+    
+    df_field = pd.DataFrame(field_data)
+    field_csv_path = os.path.join(results_dir, 'magnetic_field_optical_parameters.csv')
+    df_field.to_csv(field_csv_path, index=False, encoding='utf-8-sig')
+    print(f"  磁場別光学パラメータを保存: {field_csv_path}")
+    saved_files['field_params'] = field_csv_path
+    
+    print(f"✅ 全てのパラメータをCSVファイルに保存しました（保存先: {results_dir}）")
+    
+    return saved_files
+
 if __name__ == '__main__':
     print("\n--- 反復的2段階フィッティング解析を開始します ---")
     
@@ -1460,5 +1725,26 @@ if __name__ == '__main__':
             print("❌ ピーク誤差計算に失敗しました。")
         
         print("\n🎉 反復的フィッティング解析が完了しました。")
+        
+        # H形式とB形式の両方が解析されている場合、CSV出力を実行
+        if len(comparison_traces) >= 2:
+            print("\n=== CSV形式での結果出力を開始します ===")
+            
+            # 1. ピーク位置比較データの出力
+            peak_csv_files = save_peak_comparison_to_csv(all_data_raw, field_specific_params, comparison_traces)
+            print(f"ピーク位置比較結果:")
+            for key, path in peak_csv_files.items():
+                if path:
+                    print(f"  {key}: {path}")
+            
+            # 2. ベイズ推定パラメータの出力  
+            param_csv_files = save_fitting_parameters_to_csv(comparison_traces, field_specific_params)
+            print(f"\nベイズ推定パラメータ結果:")
+            for key, path in param_csv_files.items():
+                print(f"  {key}: {path}")
+            
+            print(f"\n✅ 全てのCSV出力が完了しました。保存先: {IMAGE_DIR}")
+        else:
+            print("\n⚠️  H形式とB形式の比較が不完全のため、CSV出力をスキップしました。")
     else:
         print("❌ 反復的フィッティングに失敗しました。")
