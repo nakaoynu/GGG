@@ -48,6 +48,46 @@ B_FIXED = 9.0  # Tesla
 d_fixed = 157.8e-6  # 膜厚は固定値として使用
 eps_bg_init = 14.20
 B4_init = 0.000576; B6_init = 0.000050
+
+# --- パフォーマンス最適化: キャッシュとユーティリティ関数 ---
+class HamiltonianCache:
+    """ハミルトニアン計算のキャッシュクラス（パフォーマンス最適化）"""
+    def __init__(self):
+        self._cache = {}
+    
+    def get_hamiltonian_cached(self, B_ext_z: float, g_factor: float, B4: float, B6: float) -> np.ndarray:
+        """キャッシュされたハミルトニアンを取得（同一パラメータでの重複計算を回避）"""
+        key = (round(B_ext_z, 6), round(g_factor, 6), round(B4, 8), round(B6, 8))
+        if key not in self._cache:
+            self._cache[key] = get_hamiltonian(B_ext_z, g_factor, B4, B6)
+        return self._cache[key]
+    
+    def clear_cache(self):
+        """キャッシュをクリア"""
+        self._cache.clear()
+
+# グローバルキャッシュインスタンス
+_hamiltonian_cache = HamiltonianCache()
+
+def get_hamiltonian_cached(B_ext_z: float, g_factor: float, B4: float, B6: float) -> np.ndarray:
+    """キャッシュされたハミルトニアン計算のパブリック関数"""
+    return _hamiltonian_cache.get_hamiltonian_cached(B_ext_z, g_factor, B4, B6)
+
+def normalize_gamma_array(gamma_input) -> np.ndarray:
+    """ガンマ配列の正規化と型安全性を確保（コード重複削減）"""
+    if np.isscalar(gamma_input):
+        return np.full(7, gamma_input)
+    elif hasattr(gamma_input, 'ndim') and gamma_input.ndim == 0:
+        return np.full(7, float(gamma_input))
+    elif hasattr(gamma_input, '__len__'):
+        if len(gamma_input) == 7:
+            return np.array(gamma_input)
+        elif len(gamma_input) > 7:
+            return np.array(gamma_input[:7])
+        else:
+            return np.pad(gamma_input, (0, 7 - len(gamma_input)), 'edge')
+    else:
+        return np.full(7, gamma_input.item())
 gamma_init = 0.11e12; a_scale_init = 0.604971; g_factor_init = 2.003147
 
 # --- データファイル設定（グローバル変数による設定の集約化） ---
@@ -621,13 +661,14 @@ def run_temperature_bayesian_fit(datasets: List[Dict[str, Any]],
         cpu_count = os.cpu_count() or 4
         try:
             print("ベイズサンプリングを開始します...")
-            # より安定したサンプリング設定
-            trace = pm.sample(2000,  # サンプル数を増加
-                              tune=2000,  # チューニング数を大幅増加
-                              chains=4,   # チェーン数を増やして収束診断の信頼性向上
-                              cores=min(cpu_count, 4), 
-                              target_accept=0.9,  # 受諾率を上げて数値安定性向上
-                              init='jitter+adapt_diag_grad',  # より高度な初期化
+            # 収束性大幅改善のためのサンプリング設定
+            trace = pm.sample(3000,  # サンプル数を大幅増加（収束性向上）
+                              tune=2000,  # チューニング数を更に増加
+                              chains=4,   # チェーン数を維持
+                              cores=min(cpu_count, 2), 
+                              target_accept=0.92,  # 受諾率を更に上げて数値安定性向上
+                              init='advi+adapt_diag',  # ADVI初期化で改善
+                              max_treedepth=12,  # Tree depthを拡張
                               idata_kwargs={"log_likelihood": True}, 
                               random_seed=42,
                               progressbar=True,
@@ -661,12 +702,13 @@ def run_temperature_bayesian_fit(datasets: List[Dict[str, Any]],
             print(f"高精度サンプリングに失敗: {e}")
             print("中精度設定でリトライします...")
             try:
-                trace = pm.sample(2000, 
-                                  tune=2000, 
+                trace = pm.sample(3000,  # 中精度でも増加
+                                  tune=2500, 
                                   chains=4, 
                                   cores=min(cpu_count, 2), 
-                                  target_accept=0.85,
-                                  init='jitter+adapt_diag_grad',  # より高度な初期化
+                                  target_accept=0.90,  # 受諾率上昇
+                                  init='advi+adapt_diag',  # 安定した初期化
+                                  max_treedepth=10,  # Tree depth追加
                                   idata_kwargs={"log_likelihood": True}, 
                                   random_seed=42,
                                   progressbar=True,
@@ -674,8 +716,8 @@ def run_temperature_bayesian_fit(datasets: List[Dict[str, Any]],
             except Exception as e2:
                 print(f"中精度設定も失敗: {e2}")
                 print("最小設定でリトライします...")
-                trace = pm.sample(2000, 
-                                  tune=3000, 
+                trace = pm.sample(2500,  # 最小設定でも増加
+                                  tune=2000, 
                                   chains=2, 
                                   cores=1,  # シングルコアで実行
                                   target_accept=0.8,
@@ -736,6 +778,371 @@ def extract_bayesian_parameters(trace: az.InferenceData) -> Dict[str, float]:
     
     return result
 
+def calculate_temperature_peak_errors(all_datasets: List[Dict[str, Any]], 
+                                    temperature_specific_params: Dict[float, Dict[str, float]], 
+                                    traces: Dict[str, az.InferenceData]) -> Dict[str, Dict[float, Dict[str, Any]]]:
+    """各温度・各モデルのピーク位置分析とピーク位置差の計算"""
+    print("\n--- 温度依存ピーク位置分析 ---")
+    
+    peak_analysis_results = {}
+    
+    for model_type, trace in traces.items():
+        print(f"\n{model_type}モデルのピーク分析を実行中...")
+        model_results = {}
+        mean_params = extract_bayesian_parameters(trace)
+        
+        for data in all_datasets:
+            temperature = data['temperature']
+            
+            # 該当温度のパラメータを取得
+            if temperature not in temperature_specific_params:
+                continue
+                
+            eps_bg_fixed = temperature_specific_params[temperature]['eps_bg']
+            
+            # 全周波数範囲での予測
+            freq_plot = np.linspace(data['frequency'].min(), data['frequency'].max(), 800)
+            omega_plot = freq_plot * 1e12 * 2 * np.pi
+            
+            # 温度依存gamma値の計算
+            base_temp = 4.0
+            temp_diff = temperature - base_temp
+            log_gamma_mu_temp = (mean_params['log_gamma_mu_base'] + 
+                               mean_params['temp_gamma_slope'] * temp_diff + 
+                               mean_params['temp_gamma_nonlinear'] * temp_diff**2)
+            gamma_array = np.exp(log_gamma_mu_temp + 
+                                mean_params['log_gamma_offset_base'] * mean_params['log_gamma_sigma_base'])
+            
+            # 統合されたガンマ配列正規化関数を使用（パフォーマンス最適化）
+            gamma_array = normalize_gamma_array(gamma_array)
+            
+            # ベイズ推定結果による予測
+            H = get_hamiltonian_cached(B_FIXED, mean_params['g_factor'], mean_params['B4'], mean_params['B6'])
+            chi_raw = calculate_susceptibility(omega_plot, H, temperature, gamma_array)
+            chi = mean_params['G0'] * chi_raw
+            
+            # モデル別の透磁率計算
+            if model_type == 'H_form':
+                mu_r = 1 + chi
+            else:  # B_form
+                mu_r = 1 / (1 - chi)
+            
+            predicted_trans = calculate_normalized_transmission(omega_plot, mu_r, d_fixed, eps_bg_fixed)
+            
+            # 実験データの正規化
+            min_exp, max_exp = data['transmittance'].min(), data['transmittance'].max()
+            trans_norm_exp = (data['transmittance'] - min_exp) / (max_exp - min_exp)
+            
+            # ピーク検出
+            peak_info = detect_peaks_enhanced(data['frequency'], trans_norm_exp, freq_plot, predicted_trans, temperature, model_type)
+            model_results[temperature] = peak_info
+            
+        peak_analysis_results[model_type] = model_results
+    
+    return peak_analysis_results
+
+def detect_peaks_enhanced(freq_exp: np.ndarray, trans_exp: np.ndarray, 
+                         freq_pred: np.ndarray, trans_pred: np.ndarray, 
+                         temperature: float, model_type: str) -> Dict[str, Any]:
+    """改良されたピーク検出とマッチング"""
+    try:
+        # 実験データのピーク検出（透過率の山）
+        exp_peaks, exp_properties = find_peaks(trans_exp, 
+                                              height=0.2,        # 高さ閾値
+                                              distance=5,        # 最小距離
+                                              prominence=0.05,   # プロミネンス
+                                              width=2)           # 最小幅
+        exp_peak_freqs = freq_exp[exp_peaks]
+        exp_peak_heights = trans_exp[exp_peaks]
+        
+        # 予測データのピーク検出
+        pred_peaks, pred_properties = find_peaks(trans_pred, 
+                                                height=0.2,       # 高さ閾値  
+                                                distance=5,       # 最小距離
+                                                prominence=0.05,  # プロミネンス
+                                                width=2)          # 最小幅
+        pred_peak_freqs = freq_pred[pred_peaks]
+        pred_peak_heights = trans_pred[pred_peaks]
+        
+        # ピーク位置マッチングと差分計算
+        matched_peaks = []
+        peak_differences = []
+        
+        if len(exp_peak_freqs) > 0 and len(pred_peak_freqs) > 0:
+            from scipy.spatial.distance import cdist
+            distances = cdist(exp_peak_freqs.reshape(-1, 1), pred_peak_freqs.reshape(-1, 1))
+            
+            for i, exp_freq in enumerate(exp_peak_freqs):
+                min_idx = np.argmin(distances[i])
+                pred_freq = pred_peak_freqs[min_idx]
+                min_distance = distances[i, min_idx]
+                
+                # マッチング条件（0.2 THz以内）
+                if min_distance < 0.2:
+                    freq_diff = pred_freq - exp_freq  # 周波数差 (THz)
+                    rel_error = abs(freq_diff / exp_freq) if exp_freq > 0 else float('inf')
+                    
+                    matched_peaks.append({
+                        'exp_freq': exp_freq,
+                        'exp_height': exp_peak_heights[i],
+                        'pred_freq': pred_freq,
+                        'pred_height': pred_peak_heights[min_idx],
+                        'freq_diff': freq_diff,
+                        'rel_error': rel_error
+                    })
+                    peak_differences.append(freq_diff)
+        
+        # 統計情報の計算
+        stats = {
+            'exp_peaks_count': len(exp_peak_freqs),
+            'pred_peaks_count': len(pred_peak_freqs),
+            'matched_peaks_count': len(matched_peaks),
+            'mean_freq_diff': np.mean(peak_differences) if peak_differences else np.nan,
+            'std_freq_diff': np.std(peak_differences) if len(peak_differences) > 1 else np.nan,
+            'max_abs_freq_diff': np.max(np.abs(peak_differences)) if peak_differences else np.nan,
+            'rms_freq_diff': np.sqrt(np.mean(np.array(peak_differences)**2)) if peak_differences else np.nan
+        }
+        
+        print(f"    {temperature}K {model_type}: {len(matched_peaks)}/{len(exp_peak_freqs)}ピークマッチ, RMS差={stats['rms_freq_diff']:.4f}THz")
+        
+        return {
+            'matched_peaks': matched_peaks,
+            'statistics': stats,
+            'exp_peak_freqs': exp_peak_freqs.tolist(),
+            'pred_peak_freqs': pred_peak_freqs.tolist(),
+            'peak_differences': peak_differences
+        }
+        
+    except Exception as e:
+        print(f"    {temperature}K {model_type}: ピーク検出エラー - {e}")
+        return {
+            'matched_peaks': [],
+            'statistics': {'error': str(e)},
+            'exp_peak_freqs': [],
+            'pred_peak_freqs': [],
+            'peak_differences': []
+        }
+
+def save_peak_analysis_to_csv(peak_analysis_results: Dict[str, Dict[float, Dict[str, Any]]], 
+                             results_dir: str = './temperature_analysis_results'):
+    """ピーク分析結果をCSV形式で保存"""
+    print("\n--- ピーク分析結果のCSV保存 ---")
+    
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # 1. 詳細なピーク位置比較データ
+    detailed_data = []
+    
+    for model_type, temp_results in peak_analysis_results.items():
+        for temperature, peak_info in temp_results.items():
+            for i, match in enumerate(peak_info['matched_peaks']):
+                detailed_data.append({
+                    'model': model_type,
+                    'temperature_K': temperature,
+                    'peak_index': i + 1,
+                    'exp_peak_freq_THz': match['exp_freq'],
+                    'pred_peak_freq_THz': match['pred_freq'],
+                    'freq_difference_THz': match['freq_diff'],
+                    'relative_error': match['rel_error'],
+                    'exp_peak_height': match['exp_height'],
+                    'pred_peak_height': match['pred_height']
+                })
+    
+    # 詳細データをCSVで保存
+    detailed_df = pd.DataFrame(detailed_data)
+    detailed_csv_path = os.path.join(results_dir, 'temperature_peak_analysis_detailed.csv')
+    detailed_df.to_csv(detailed_csv_path, index=False)
+    print(f"  詳細ピーク分析データ: {detailed_csv_path}")
+    
+    # 2. 統計サマリーデータ
+    summary_data = []
+    
+    for model_type, temp_results in peak_analysis_results.items():
+        for temperature, peak_info in temp_results.items():
+            stats = peak_info['statistics']
+            summary_data.append({
+                'model': model_type,
+                'temperature_K': temperature,
+                'exp_peaks_count': stats.get('exp_peaks_count', 0),
+                'pred_peaks_count': stats.get('pred_peaks_count', 0),
+                'matched_peaks_count': stats.get('matched_peaks_count', 0),
+                'matching_rate': stats.get('matched_peaks_count', 0) / max(stats.get('exp_peaks_count', 1), 1),
+                'mean_freq_diff_THz': stats.get('mean_freq_diff', np.nan),
+                'std_freq_diff_THz': stats.get('std_freq_diff', np.nan),
+                'max_abs_freq_diff_THz': stats.get('max_abs_freq_diff', np.nan),
+                'rms_freq_diff_THz': stats.get('rms_freq_diff', np.nan)
+            })
+    
+    # サマリーデータをCSVで保存
+    summary_df = pd.DataFrame(summary_data)
+    summary_csv_path = os.path.join(results_dir, 'temperature_peak_analysis_summary.csv')
+    summary_df.to_csv(summary_csv_path, index=False)
+    print(f"  ピーク分析統計サマリー: {summary_csv_path}")
+    
+    # 3. H_form vs B_form のピーク位置差比較
+    comparison_csv_path = None  # 初期化
+    if 'H_form' in peak_analysis_results and 'B_form' in peak_analysis_results:
+        comparison_data = []
+        
+        h_results = peak_analysis_results['H_form']
+        b_results = peak_analysis_results['B_form']
+        
+        # 共通温度での比較
+        common_temps = set(h_results.keys()) & set(b_results.keys())
+        
+        for temp in sorted(common_temps):
+            h_stats = h_results[temp]['statistics']
+            b_stats = b_results[temp]['statistics']
+            
+            comparison_data.append({
+                'temperature_K': temp,
+                'H_form_rms_diff_THz': h_stats.get('rms_freq_diff', np.nan),
+                'B_form_rms_diff_THz': b_stats.get('rms_freq_diff', np.nan),
+                'H_form_matched_peaks': h_stats.get('matched_peaks_count', 0),
+                'B_form_matched_peaks': b_stats.get('matched_peaks_count', 0),
+                'H_form_mean_diff_THz': h_stats.get('mean_freq_diff', np.nan),
+                'B_form_mean_diff_THz': b_stats.get('mean_freq_diff', np.nan),
+                'rms_diff_H_vs_B': abs(h_stats.get('rms_freq_diff', np.nan) - b_stats.get('rms_freq_diff', np.nan)),
+                'better_model': 'H_form' if h_stats.get('rms_freq_diff', float('inf')) < b_stats.get('rms_freq_diff', float('inf')) else 'B_form'
+            })
+        
+        # モデル比較データをCSVで保存
+        comparison_df = pd.DataFrame(comparison_data)
+        comparison_csv_path = os.path.join(results_dir, 'H_vs_B_form_peak_comparison.csv')
+        comparison_df.to_csv(comparison_csv_path, index=False)
+        print(f"  H_form vs B_form ピーク位置比較: {comparison_csv_path}")
+        
+        # 全体サマリー
+        print(f"\n=== ピーク位置差分析結果サマリー ===")
+        print(f"解析温度数: {len(common_temps)}")
+        print(f"詳細データ: {len(detailed_data)} 件のピークマッチング")
+        print(f"H_form 平均RMS差: {comparison_df['H_form_rms_diff_THz'].mean():.4f} THz")
+        print(f"B_form 平均RMS差: {comparison_df['B_form_rms_diff_THz'].mean():.4f} THz")
+        
+        # 優位モデルの統計
+        h_wins = sum(comparison_df['better_model'] == 'H_form')
+        b_wins = sum(comparison_df['better_model'] == 'B_form')
+        print(f"ピーク位置精度: H_form={h_wins}温度, B_form={b_wins}温度で優位")
+    
+    print(f"✅ 全てのピーク分析結果をCSVファイルに保存（保存先: {results_dir}）")
+    
+    return {
+        'detailed_csv': detailed_csv_path,
+        'summary_csv': summary_csv_path,
+        'comparison_csv': comparison_csv_path
+    }
+
+def save_fitting_parameters_to_csv(traces: Dict[str, az.InferenceData], 
+                                 temperature_specific_params: Dict[float, Dict[str, float]],
+                                 results_dir: str = './temperature_analysis_results'):
+    """H_formとB_formの最終フィッティングパラメータをCSV形式で保存する"""
+    print("\n--- フィッティングパラメータのCSV保存 ---")
+    
+    # 結果保存ディレクトリの作成
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # 各モデルのパラメータを抽出
+    model_parameters = {}
+    
+    for model_type, trace in traces.items():
+        print(f"{model_type}モデルのパラメータを抽出中...")
+        
+        # ベイズ推定パラメータの抽出
+        bayesian_params = extract_bayesian_parameters(trace)
+        
+        # 統計情報も追加抽出
+        posterior = trace["posterior"]
+        
+        # パラメータの統計情報を詳細に取得
+        param_stats = {}
+        
+        # 基本パラメータの統計
+        for param_name in ['a_scale', 'g_factor', 'B4', 'B6']:
+            if param_name in posterior.data_vars:
+                param_data = posterior[param_name]
+                param_stats[f'{param_name}_mean'] = float(param_data.mean())
+                param_stats[f'{param_name}_std'] = float(param_data.std())
+                param_stats[f'{param_name}_hdi_3%'] = float(param_data.quantile(0.03))
+                param_stats[f'{param_name}_hdi_97%'] = float(param_data.quantile(0.97))
+        
+        # 温度依存gammaパラメータの統計
+        gamma_params = ['log_gamma_mu_base', 'temp_gamma_slope', 'temp_gamma_nonlinear']
+        for param_name in gamma_params:
+            if param_name in posterior.data_vars:
+                param_data = posterior[param_name]
+                param_stats[f'{param_name}_mean'] = float(param_data.mean())
+                param_stats[f'{param_name}_std'] = float(param_data.std())
+                param_stats[f'{param_name}_hdi_3%'] = float(param_data.quantile(0.03))
+                param_stats[f'{param_name}_hdi_97%'] = float(param_data.quantile(0.97))
+        
+        # log_gamma_sigma_base（ベクトルパラメータ）の統計
+        if 'log_gamma_sigma_base' in posterior.data_vars:
+            sigma_data = posterior['log_gamma_sigma_base']
+            if sigma_data.ndim > 2:  # ベクトルの場合
+                for i in range(sigma_data.shape[-1]):
+                    param_stats[f'log_gamma_sigma_base_{i}_mean'] = float(sigma_data[..., i].mean())
+                    param_stats[f'log_gamma_sigma_base_{i}_std'] = float(sigma_data[..., i].std())
+            else:  # スカラーの場合
+                param_stats['log_gamma_sigma_base_mean'] = float(sigma_data.mean())
+                param_stats['log_gamma_sigma_base_std'] = float(sigma_data.std())
+        
+        # log_gamma_offset_base（7次元ベクトル）の統計
+        if 'log_gamma_offset_base' in posterior.data_vars:
+            offset_data = posterior['log_gamma_offset_base']
+            for i in range(7):
+                param_stats[f'log_gamma_offset_base_{i}_mean'] = float(offset_data[..., i].mean())
+                param_stats[f'log_gamma_offset_base_{i}_std'] = float(offset_data[..., i].std())
+                param_stats[f'log_gamma_offset_base_{i}_hdi_3%'] = float(offset_data[..., i].quantile(0.03))
+                param_stats[f'log_gamma_offset_base_{i}_hdi_97%'] = float(offset_data[..., i].quantile(0.97))
+        
+        # 導出パラメータ（G0）を追加
+        param_stats['G0_mean'] = bayesian_params.get('G0', 0)
+        
+        model_parameters[model_type] = param_stats
+    
+    # CSV形式での保存
+    # 1. 各モデル別の詳細パラメータファイル
+    for model_type, params in model_parameters.items():
+        df_model = pd.DataFrame(list(params.items()), columns=['Parameter', 'Value'])
+        model_csv_path = os.path.join(results_dir, f'fitting_parameters_{model_type.lower()}.csv')
+        df_model.to_csv(model_csv_path, index=False)
+        print(f"  {model_type}パラメータを保存: {model_csv_path}")
+    
+    # 2. モデル比較用の統合ファイル（主要パラメータのみ）
+    comparison_data = []
+    main_params = ['a_scale_mean', 'g_factor_mean', 'B4_mean', 'B6_mean', 'G0_mean', 
+                   'log_gamma_mu_base_mean', 'temp_gamma_slope_mean', 'temp_gamma_nonlinear_mean']
+    
+    for model_type, params in model_parameters.items():
+        row = {'Model': model_type}
+        for param in main_params:
+            row[param] = params.get(param, np.nan)
+        comparison_data.append(row)
+    
+    df_comparison = pd.DataFrame(comparison_data)
+    comparison_csv_path = os.path.join(results_dir, 'model_comparison_parameters.csv')
+    df_comparison.to_csv(comparison_csv_path, index=False)
+    print(f"  モデル比較パラメータを保存: {comparison_csv_path}")
+    
+    # 3. 温度別光学パラメータ（eps_bg）の保存
+    temp_data = []
+    for temp, params in sorted(temperature_specific_params.items()):
+        temp_data.append({
+            'Temperature_K': temp,
+            'eps_bg': params.get('eps_bg', np.nan),
+            'Fixed_thickness_um': d_fixed * 1e6,  # μm単位
+            'Fixed_B_field_T': B_FIXED
+        })
+    
+    df_temp = pd.DataFrame(temp_data)
+    temp_csv_path = os.path.join(results_dir, 'temperature_optical_parameters.csv')
+    df_temp.to_csv(temp_csv_path, index=False)
+    print(f"  温度別光学パラメータを保存: {temp_csv_path}")
+    
+    print(f"✅ 全てのパラメータをCSVファイルに保存しました（保存先: {results_dir}）")
+    
+    return model_parameters
+
 def load_data_full_range_temperature(file_path: str, sheet_name: str) -> List[Dict[str, Any]]:
     """全周波数範囲の温度依存データを読み込む。"""
     try:
@@ -778,7 +1185,7 @@ def plot_temperature_results(all_datasets: List[Dict[str, Any]],
     mean_log_gamma_mu_base = float(posterior['log_gamma_mu_base'].mean())
     mean_temp_gamma_slope = float(posterior['temp_gamma_slope'].mean())
     mean_temp_gamma_nonlinear = float(posterior['temp_gamma_nonlinear'].mean())
-    mean_log_gamma_sigma_base = float(posterior['log_gamma_sigma_base'].mean())
+    mean_log_gamma_sigma_base = posterior['log_gamma_sigma_base'].mean().values  # ベクトルのまま保持
     mean_log_gamma_offset_base = posterior['log_gamma_offset_base'].mean().values
     
     G0 = mean_a_scale * mu0 * N_spin * (mean_g_factor * muB)**2 / (2 * hbar)
@@ -925,7 +1332,7 @@ def plot_combined_temperature_model_comparison(all_datasets: List[Dict[str, Any]
         mean_log_gamma_mu_base = float(posterior['log_gamma_mu_base'].mean())
         mean_temp_gamma_slope = float(posterior['temp_gamma_slope'].mean())
         mean_temp_gamma_nonlinear = float(posterior['temp_gamma_nonlinear'].mean())
-        mean_log_gamma_sigma_base = float(posterior['log_gamma_sigma_base'].mean())
+        mean_log_gamma_sigma_base = posterior['log_gamma_sigma_base'].mean().values  # ベクトルのまま保持
         mean_log_gamma_offset_base = posterior['log_gamma_offset_base'].mean().values
         
         G0 = mean_a_scale * mu0 * N_spin * (mean_g_factor * muB)**2 / (2 * hbar)
@@ -1067,8 +1474,16 @@ def plot_combined_temperature_model_comparison(all_datasets: List[Dict[str, Any]
             log_gamma_mu_temp = (temp_gamma_params['log_gamma_mu_base'] + 
                                temp_gamma_params['temp_gamma_slope'] * temp_diff + 
                                temp_gamma_params['temp_gamma_nonlinear'] * temp_diff**2)
-            gamma_array = np.exp(log_gamma_mu_temp + 
-                               temp_gamma_params['log_gamma_offset_base'] * temp_gamma_params['log_gamma_sigma_base'])
+            
+            # 正しい配列演算：スカラー + 7要素配列 → 7要素配列
+            log_gamma_offset_scaled = temp_gamma_params['log_gamma_offset_base'] * temp_gamma_params['log_gamma_sigma_base']
+            gamma_array = np.exp(log_gamma_mu_temp + log_gamma_offset_scaled)
+            
+            # デバッグ用出力
+            if not isinstance(gamma_array, np.ndarray) or gamma_array.size != 7:
+                print(f"  [DEBUG] gamma_array計算結果: type={type(gamma_array)}, shape={getattr(gamma_array, 'shape', 'N/A')}")
+                print(f"  [DEBUG] log_gamma_mu_temp: {log_gamma_mu_temp} (スカラー)")
+                print(f"  [DEBUG] log_gamma_offset_scaled: shape={log_gamma_offset_scaled.shape if hasattr(log_gamma_offset_scaled, 'shape') else 'N/A'}")
             
             # === 型チェック強化: 平均gamma_arrayが確実に7要素の配列になるように修正 ===
             if np.isscalar(gamma_array):
@@ -1220,11 +1635,83 @@ def plot_model_selection_results_temperature(traces: Dict[str, az.InferenceData]
     """温度依存版LOO-CVの結果を横棒グラフで出力"""
     print("\n--- 温度依存モデル選択指標の評価 ---")
     
+    # 結果保存ディレクトリの設定
+    results_dir = './temperature_analysis_results'
+    os.makedirs(results_dir, exist_ok=True)
+    
     model_names = list(traces.keys())
     loo_values = []
     loo_errors = []
     waic_values = []
     waic_errors = []
+    
+    print("\n" + "="*60)
+    print("LOO-CV および WAIC モデル比較分析")
+    print("="*60)
+    
+    # az.compare()を使用したモデル比較
+    print("\n--- az.compare()による詳細モデル比較 ---")
+    try:
+        # LOO-CVによる比較
+        loo_comparison = az.compare(traces, ic='loo', method='stacking')
+        print("\nLOO-CV比較結果:")
+        print(loo_comparison)
+        
+        # CSV保存 (LOO-CV)
+        loo_csv_path = os.path.join(results_dir, 'temperature_model_comparison_LOO.csv')
+        loo_comparison.to_csv(loo_csv_path)
+        print(f"LOO-CV比較結果をCSVに保存: {loo_csv_path}")
+        
+        # WAIC による比較
+        waic_comparison = az.compare(traces, ic='waic', method='stacking')
+        print("\nWAIC比較結果:")
+        print(waic_comparison)
+        
+        # CSV保存 (WAIC)
+        waic_csv_path = os.path.join(results_dir, 'temperature_model_comparison_WAIC.csv')
+        waic_comparison.to_csv(waic_csv_path)
+        print(f"WAIC比較結果をCSVに保存: {waic_csv_path}")
+        
+        # 詳細分析結果の表示
+        if loo_comparison is not None:
+            print("\n--- LOO-CV詳細分析 ---")
+            best_model = loo_comparison.index[0]
+            print(f"最優秀モデル: {best_model}")
+            
+            # 各モデル間の差と標準誤差（安全な変換）
+            for i, model in enumerate(loo_comparison.index):
+                if i > 0:  # 最優秀モデル以外
+                    try:
+                        d_loo_raw = loo_comparison.loc[model, 'elpd_diff']
+                        se_diff_raw = loo_comparison.loc[model, 'dse']
+                        # 型エラー回避のため文字列経由で変換
+                        d_loo = float(str(d_loo_raw))
+                        se_diff = float(str(se_diff_raw))
+                        print(f"{model} vs {best_model}: Δelpd = {d_loo:.2f} ± {se_diff:.2f}")
+                        
+                        # 統計的有意性の判定
+                        if abs(d_loo) > 2 * se_diff:
+                            significance = "有意な差あり"
+                        elif abs(d_loo) > se_diff:
+                            significance = "やや差あり"
+                        else:
+                            significance = "差なし"
+                        
+                        if se_diff != 0:  # ゼロ除算回避
+                            ratio = abs(d_loo/se_diff)
+                            print(f"  → {significance} (|Δelpd/SE| = {ratio:.2f})")
+                        else:
+                            print(f"  → {significance}")
+                    except Exception as conv_error:
+                        print(f"  統計値変換エラー: {conv_error}")
+                        print(f"  {model} vs {best_model}: 比較不能")
+        
+    except Exception as e:
+        print(f"az.compare()でのモデル比較に失敗: {e}")
+        loo_comparison = None
+        waic_comparison = None
+    
+    print("\n--- 個別モデルのLOO/WAIC計算 ---")
     
     # データ収集
     for model_name, trace in traces.items():
@@ -1526,6 +2013,29 @@ def run_iterative_temperature_bayesian_workflow():
             print("\n--- H_form と B_form の統合比較プロット（2×2レイアウト）作成中 ---")
             all_data_full = load_data_full_range_temperature(DATA_FILE_PATH, DATA_SHEET_NAME)
             plot_combined_temperature_model_comparison(all_data_full, temperature_specific_params, final_traces)
+            
+            # LOO-CV および WAIC によるモデル比較
+            print("\n--- LOO-CV および WAIC によるモデル選択指標の評価 ---")
+            plot_model_selection_results_temperature(final_traces)
+            
+            # ★ 新機能: H_form と B_form のピーク位置差分析 ★
+            print("\n--- ピーク位置差分析の実行 ---")
+            peak_analysis_results = calculate_temperature_peak_errors(
+                all_data_full, 
+                temperature_specific_params, 
+                final_traces
+            )
+            
+            # CSV形式での結果保存
+            csv_paths = save_peak_analysis_to_csv(peak_analysis_results)
+            print(f"✅ ピーク位置分析完了 - CSV保存先:")
+            for key, path in csv_paths.items():
+                if path:
+                    print(f"    {key}: {path}")
+        
+        # フィッティングパラメータのCSV保存（1つ以上のモデルがある場合）
+        if len(final_traces) >= 1:
+            save_fitting_parameters_to_csv(final_traces, temperature_specific_params)
         
         # 温度依存性プロット
         plot_temperature_dependencies(temperature_specific_params, trace_result)

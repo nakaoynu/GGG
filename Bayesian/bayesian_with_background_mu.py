@@ -81,7 +81,6 @@ def calculate_susceptibility(omega_array: np.ndarray, H: np.ndarray, T: float, g
             gamma_array = gamma_array[:len(delta_E)]
         else:
             gamma_array = np.pad(gamma_array, (0, len(delta_E) - len(gamma_array)), 'edge')
-
     numerator = delta_pop * transition_strength
     denominator = (omega_0[:, np.newaxis] - omega_array) - (1j * gamma_array[:, np.newaxis])
     
