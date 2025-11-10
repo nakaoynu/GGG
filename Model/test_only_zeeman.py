@@ -91,31 +91,21 @@ def calculate_chi_M(omega, T, B, g, gamma):
     complex: 複素磁気感受率 chi_M
     """
     
+    
     omega_0 = g * mu_B * B / hbar  # Zeeman固有周波数 (rad/s)
     a_B = g * mu_B * B / k_B / T  # 無次元係数
 
-    # 分配関数
-    Z = sum(np.exp(a_B * m) for m in np.arange(-s, s + 1))
-    
-    # 複数の遷移を考慮した磁気感受率の計算
-    chi_M = 0 + 0j
-    
-    # 各遷移 |m⟩ → |m±1⟩ を考慮
-    for m in np.arange(-s, s):
-        # 選択則: Δm = ±1
-        m_upper = m + 1
-        
-        # ボルツマン因子の差（遷移強度）
-        population_diff = (np.exp(a_B * m) - np.exp(a_B * m_upper)) / Z
-        
-        # 遷移双極子モーメントの行列要素の二乗（簡略化）
-        # ⟨m|S_±|m±1⟩ ∝ sqrt[(s∓m)(s±m+1)]
-        matrix_element_sq = (s - m) * (s + m + 1)
-        
-        # 各遷移の寄与（Lorentz型）
-        chi_M += (mu_0 * N_spin * (g * mu_B)**2 * matrix_element_sq * population_diff) / \
-                 (hbar * (omega_0 - omega - 1j * gamma))
-    
+    Z = sum(np.exp(a_B * m) for m in np.arange(-s, s + 1))  # 分配関数
+    A = np.sinh(a_B * s / 2) * np.cosh(a_B * (s + 1) / 2) / np.sinh(a_B / 2)
+    d2A_dA2 = calculate_d2A_daB2_analytical(a_B, s)
+    A_coeff = 2 * ((1 + s**2) * A - d2A_dA2)
+    G0 = mu_0 * N_spin * (g * mu_B)**2 / (2 * hbar) # 結合定数G0
+
+    numerator = (1 - np.exp(a_B)) * (1 + s**2 * A_coeff) * G0
+    denominator = Z * (omega_0 - (omega + 1j * gamma))
+
+    chi_M = -1 * (numerator / denominator)
+
     return chi_M
 
 def calculate_chi_E(omega):
@@ -248,7 +238,7 @@ if __name__ == "__main__":
     g = 1.95                            # g因子
     
     # 緩和定数の設定（線幅を制御）
-    # 実験的な線幅から推定: FWHM ~ 0.03 THz → gamma ~ 2π × 0.015 THz
+    # 実験的な線幅から推定: FWHM ~ 0.05 THz → gamma ~ 2π × 0.015 THz
     gamma = 2 * np.pi * 0.015 * 1e12    # 緩和定数 (rad/s)
     
     # Zeeman周波数の確認
@@ -258,7 +248,7 @@ if __name__ == "__main__":
     print(f"線幅 (gamma): {gamma / (2 * np.pi * 1e12):.4f} THz")
     
     # 計算する周波数範囲 (THz -> rad/s)
-    freq_thz = np.linspace(0, 1.2, 601)
+    freq_thz = np.linspace(0, 1.0, 401)
     omega_rads = freq_thz * 1e12 * (2 * np.pi)
 
     # スペクトル計算
@@ -266,35 +256,22 @@ if __name__ == "__main__":
     
     # NaN値を除去
     T_spec = np.nan_to_num(T_spec, nan=1.0)
-    
-    # 吸収スペクトルに変換（1 - Transmission）
-    absorption_spec = 1 - T_spec
 
     # スペクトルの正規化
-    min_val, max_val = np.min(absorption_spec), np.max(absorption_spec)
-    if max_val > min_val and np.isfinite(max_val) and np.isfinite(min_val):
-        absorption_spec_norm = (absorption_spec - min_val) / (max_val - min_val)
+    min_trans, max_trans = np.min(T_spec), np.max(T_spec)
+    if max_trans > min_trans and np.isfinite(max_trans) and np.isfinite(min_trans):
+        T_spec = (T_spec - min_trans) / (max_trans - min_trans)
     else:
-        absorption_spec_norm = np.full_like(absorption_spec, 0.5)
+        T_spec = np.full_like(T_spec, 0.5)
     
-    # 結果のプロット（2つのサブプロット）
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+    R_spec = 1 - T_spec
     
-    # 透過スペクトル
-    ax1.plot(freq_thz, T_spec)
-    ax1.set_xlabel("Frequency (THz)")
-    ax1.set_ylabel(r"Transmission T($\omega$)")
-    ax1.set_title(f"Transmission Spectrum (T={T} K, B={B} T)")
-    ax1.grid(True)
-    ax1.set_ylim(0, 1.1)
-    
-    # 正規化吸収スペクトル
-    ax2.plot(freq_thz, absorption_spec_norm)
-    ax2.set_xlabel("Frequency (THz)")
-    ax2.set_ylabel(r"Normalised Absorption (1 - T)")
-    ax2.set_title(f"Normalised Absorption Spectrum (T={T} K, B={B} T)")
-    ax2.grid(True)
-    ax2.set_ylim(0, 1.1)
-    
-    plt.tight_layout()
+    # 結果のプロット
+    plt.figure(figsize=(10, 6))
+    plt.plot(freq_thz, T_spec)
+    plt.xlabel("Frequency (THz)")
+    plt.ylabel(r"Transmission T($\omega$)")
+    plt.title(f"Normalised Transmission Spectrum (T={T} K, B={B} T)")
+    plt.grid(True)
+    plt.ylim(0, 1.1) # 透過率は 0 から 1 の範囲
     plt.savefig("NR_spectrum.png", dpi=200)
