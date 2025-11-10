@@ -1,0 +1,159 @@
+# ================================================================
+# 解析スクリプト用 設定ファイル (config.yml)
+# ================================================================
+
+# --- ファイルパス設定 ---
+file_paths:
+  # OneDriveのパスは環境によって異なる可能性があるため注意
+  data_file: "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_Temperature.xlsx"
+  sheet_name: "Corrected Data"
+  # 結果を出力する親ディレクトリ名
+  results_parent_dir: "analysis_results"
+
+# --- 実行環境設定 ---
+execution:
+  # GPU (NVIDIA CUDA) を使用するかどうか (true/false)
+  use_gpu: false
+
+# --- 物理パラメータ・初期値 ---
+physical_parameters:
+  # 固定磁場 (Tesla)
+  B_fixed: 9.0
+  # 膜厚 (meter) - 固定値として使用
+  d_fixed: 157.8e-6
+  # スピン量子数
+  s: 3.5
+  # スピン密度 (m^-3)
+  N_spin: 1.9386e+28 # 24 / 1.238 * 1e27
+
+  # --- パラメータの初期値 ---
+  # B_form成功例から最適化 (2025-11-06)
+  initial_values:
+    eps_bg: 14.20
+    g_factor: 1.990    # H_form傾向に合わせて調整 (B_formは2.016)
+    B4: 0.000300       # B_formより小さい値を期待
+    B6: 0.000030       # B_formに近い値
+    gamma: 0.11e12
+    a_scale: 0.690     # B_form(0.669)より若干大きめを期待
+
+# --- 解析条件設定 ---
+analysis_settings:
+  # Excelファイル内の測定温度を示す列名
+  temperature_columns: ['4K', '30K', '100K', '300K']
+  # 周波数領域のカットオフ値 (THz)
+  low_freq_cutoff: 0.361505
+  high_freq_cutoff: 0.45
+  
+  # --- 重み付け設定 ---
+  weight_settings:
+    # ピーク検出の閾値設定
+    peak_height_threshold: 0.01      # ピーク検出の最小高さ
+    peak_prominence_threshold: 0.05  # ピーク検出のプロミネンス閾値
+    peak_distance: 10                # ピーク間の最小距離
+    
+    # 重み値設定  
+    lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
+    between_peaks_weight: 0.3       # LP-UP間の重み
+    high_freq_peak_weight: 1.0      # 高周波ピークの重み
+    background_weight: 0.01          # その他の領域の重み
+    
+    # フィッティング対象のモデル
+    model_types: ['H_form', "B_form"]   
+
+# --- ベイズ推定事前分布設定 ---
+bayesian_priors:
+  # 磁気パラメータの事前分布設定
+  magnetic_parameters:
+    # a_scale パラメータ (HalfNormal分布)
+    a_scale:
+      distribution: "HalfNormal"
+      sigma: 1.0
+    
+    # g因子 (Normal分布)
+    g_factor:
+      distribution: "Normal" 
+      sigma: 0.1
+      # muは initial_values から自動取得
+    
+    # 結晶場パラメータ B4 (Normal分布)
+    B4:
+      distribution: "Normal"
+      sigma: 0.001
+      # muは initial_values から自動取得
+    
+    # 結晶場パラメータ B6 (Normal分布)
+    B6:
+      distribution: "Normal"
+      sigma: 0.0001
+      # muは initial_values から自動取得
+  
+  # 事前情報がある場合の設定（2回目以降のモデルで使用）
+  with_prior_info:
+    # a_scale (Normal分布に変更)
+    a_scale:
+      distribution: "Normal"
+      sigma: 0.5  # 0.2 → 0.5 (より寛容)
+    
+    # g因子 
+    g_factor:
+      distribution: "Normal"
+      sigma: 0.1  # 0.05 → 0.1
+    
+    # B4
+    B4:
+      distribution: "Normal"
+      sigma: 0.001  # 0.0005 → 0.001
+    
+    # B6
+    B6:
+      distribution: "Normal"
+      sigma: 0.0001
+  
+  # gamma関連の事前分布設定
+  gamma_parameters:
+    # log(gamma)のベース値
+    log_gamma_mu_base:
+      distribution: "Normal"
+      sigma: 1.0
+      # muは log(gamma_init) から自動取得
+    
+    # log(gamma)の分散
+    log_gamma_sigma_base:
+      distribution: "HalfNormal"
+      sigma: 0.3  # 0.8 → 0.3 (offset間の相関を強める)
+    
+    # 各遷移のoffset
+    log_gamma_offset_base:
+      distribution: "Normal"
+      mu: 0.0
+      sigma: 0.3  # 0.8 → 0.3 (変動を抑える)
+      shape: 7
+    
+    # 温度依存性係数
+    temp_gamma_slope:
+      distribution: "Normal"
+      mu: 0.0
+      sigma: 0.01
+    
+    # 温度依存性の非線形項 (削除してパラメータ数削減)
+    # temp_gamma_nonlinear:
+    #   distribution: "Normal"
+    #   mu: 0.0
+    #   sigma: 0.001
+  
+  # ノイズパラメータ
+  noise_parameters:
+    sigma:
+      distribution: "HalfNormal"
+      sigma: 0.05
+
+# --- MCMCサンプリング設定 ---
+mcmc:
+  draws: 4000              
+  tune: 2000               
+  chains: 4
+  target_accept: 0.95
+  max_iterations: 2
+  init: "adapt_diag"       # 適応的対角初期化
+  random_seed: 42          # 再現性確保のための乱数シード (2025-11-06追加)
+  # nuts_sampler: "numpyro"  # ← CompoundStepモデルではnumpyro使用不可(PyMC標準を使用)
