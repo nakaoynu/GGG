@@ -1011,7 +1011,8 @@ def run_temperature_bayesian_fit(datasets: List[Dict[str, Any]],
                 'random_seed': MCMC_CONFIG.get('random_seed', None),  # 再現性確保
                 'init': MCMC_CONFIG.get('init', 'auto'),
                 'return_inferencedata': True,
-                'progressbar': True
+                'progressbar': True,
+                'idata_kwargs': {'log_likelihood': True}  # LOO-CV用にlog_likelihoodを保存
             }
             
             trace = pm.sample(**sample_kwargs)

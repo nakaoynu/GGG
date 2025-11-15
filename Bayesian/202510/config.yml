@@ -156,4 +156,5 @@ mcmc:
   max_iterations: 2
   init: "adapt_diag"       # 適応的対角初期化
   random_seed: 42          # 再現性確保のための乱数シード (2025-11-06追加)
+  simplified_gamma: false  # true: gamma固定モード (収束診断用)
   # nuts_sampler: "numpyro"  # ← CompoundStepモデルではnumpyro使用不可(PyMC標準を使用)

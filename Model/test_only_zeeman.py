@@ -137,7 +137,6 @@ def calculate_wave_number(omega, chi_M, chi_E):
     k_imag = np.imag(k)
     return k_real, k_imag  # 戻り値は実部[0]と虚部[1]のタプル
 
-
 def calculate_phase(omega, chi_M, chi_E):
     """
     位相 phi を計算 
@@ -170,7 +169,7 @@ def calculate_phase(omega, chi_M, chi_E):
 def calculate_T_spec(Z_r, phi, k):
     """
     透過率 T(omega) を計算 
-    T = |Z_r|^2 / [ (1+|Z_r|^2)^2 * {1 - e^(-2k"L)cos^(2(k'L+phi))} + 4(Re{Z_r})^2 * {1 + e^(-2k"L)cos^(2(k'L+phi))} ]
+    T = 2*|Z_r|^2 / [ (1+|Z_r|^2)^2 * {1 - e^(-2k"L)cos^(2(k'L+phi))} + 4(Re{Z_r})^2 * {1 + e^(-2k"L)cos^(2(k'L+phi))} ]
     """
     
     Z_r_abs_sq = np.abs(Z_r)**2
@@ -233,7 +232,7 @@ def get_T_spec_spectrum(omega_rads, T, B, g, gamma):
 if __name__ == "__main__":
     
     # パラメータ設定
-    T = 4.0                             # 温度 (K)
+    T = 1.0e-5                             # 温度 (K)
     B = 9.0                             # 磁場 (T)
     g = 1.95                            # g因子
     
