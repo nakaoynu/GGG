@@ -437,6 +437,9 @@ def create_frequency_weights(dataset: Dict[str, Any], analysis_settings: Dict[st
     weight_config = analysis_settings['weight_settings']
     high_freq_cutoff = analysis_settings['high_freq_cutoff']
     
+    # デバッグ出力: 設定値を確認
+    print(f"  [DEBUG] between_peaks_weight設定値: {weight_config['between_peaks_weight']}")
+    
     freq = dataset['frequency']
     trans = dataset['transmittance_full']
     

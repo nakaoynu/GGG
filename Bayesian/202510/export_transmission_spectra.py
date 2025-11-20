@@ -110,6 +110,7 @@ def update_module_state(config: Dict) -> None:
 
 
 def load_full_datasets(config: Dict) -> Dict[float, Dict]:
+    """全温度データセットを読み込み、重み配列を生成する"""
     data_bundle = wbf.load_and_split_data_three_regions_temperature(
         file_path=config["file_paths"]["data_file"],
         sheet_name=config["file_paths"]["sheet_name"],
@@ -119,6 +120,9 @@ def load_full_datasets(config: Dict) -> Dict[float, Dict]:
     datasets = {}
     for dataset in data_bundle["all_full"]:
         temp = float(dataset["temperature"])
+        # 重み配列を生成して追加
+        weights = wbf.create_frequency_weights(dataset, config["analysis_settings"])
+        dataset["weights"] = weights
         datasets[temp] = dataset
     return datasets
 
@@ -260,7 +264,7 @@ def calculate_transmission_single(
     hamiltonian = wbf.get_hamiltonian(wbf.B_FIXED, g_factor, param_b4, param_b6)
     chi_raw = wbf.calculate_susceptibility(omega_eval, hamiltonian, temperature, gamma_array)
     g0 = a_scale * MU0 * n_spin * (g_factor * MUB) ** 2 / (2 * HBAR)
-    chi = g0 * chi_raw
+    chi: np.ndarray = g0 * chi_raw
 
     if model_type == "B_form":
         mu_r = 1.0 / (1.0 - chi)
@@ -349,6 +353,9 @@ def simulate_predictions(
         gamma_map, model_type, n_spin
     )
 
+    # 重み情報も返す(存在する場合)
+    weights = dataset.get("weights", np.ones_like(freq_eval))
+    
     return {
         "frequency_thz": freq_eval,
         "mean": mean_pred,
@@ -356,6 +363,7 @@ def simulate_predictions(
         "lower": lower,
         "upper": upper,
         "observed": normalize_transmittance(dataset.get("transmittance_full", freq_eval * 0.0)),
+        "weights": weights,
     }
 
 
@@ -384,7 +392,23 @@ def save_outputs(
     ax.fill_between(freq, summary["lower"], summary["upper"], color="tab:blue", alpha=0.3, label="95%信用区間")
     ax.plot(freq, summary["mean"], color="tab:blue", linewidth=2.0, label="事後平均", linestyle='--')
     ax.plot(freq, summary["map"], color="tab:red", linewidth=2.5, label="MAP推定値")
-    ax.scatter(freq, summary["observed"], color="black", s=15, alpha=0.6, label="実験データ（正規化済み）")
+    
+    # 重み情報がある場合、重みに応じて色分けして表示
+    weights = summary.get("weights", np.ones_like(freq))
+    mask_weight_1 = np.abs(weights - 1.0) < 1e-6  # 重み=1.0の点
+    mask_weight_08 = np.abs(weights - 0.8) < 1e-6  # 重み=0.8の点
+    mask_weight_other = ~(mask_weight_1 | mask_weight_08)  # その他の重みの点
+    
+    if np.any(mask_weight_other):
+        ax.scatter(freq[mask_weight_other], summary["observed"][mask_weight_other], 
+                  color="lightgray", s=12, alpha=0.5, label="実験データ(背景)", zorder=3)
+    if np.any(mask_weight_08):
+        ax.scatter(freq[mask_weight_08], summary["observed"][mask_weight_08], 
+                  color="orange", s=16, alpha=0.7, label="実験データ(重み=0.8)", zorder=4)
+    if np.any(mask_weight_1):
+        ax.scatter(freq[mask_weight_1], summary["observed"][mask_weight_1], 
+                  color="black", s=20, alpha=0.8, label="実験データ(重み=1.0)", zorder=5)
+    
     ax.set_xlabel("周波数 (THz)")
     ax.set_ylabel("正規化透過率")
     ax.set_title(f"{model_type} 透過スペクトル @ {temperature:.0f} K")
@@ -448,8 +472,22 @@ def save_comparison_outputs(
              label="H_form MAP推定値", linestyle='-')
     ax1.plot(freq, summary_b["map"], color="tab:blue", linewidth=2.5, 
              label="B_form MAP推定値", linestyle='-')
-    ax1.scatter(freq, summary_h["observed"], color="black", s=20, alpha=0.7, 
-                label="実験データ（正規化済み）", zorder=5)
+    
+    # 重み情報がある場合、重みに応じて色分けして表示
+    weights = summary_h.get("weights", np.ones_like(freq))
+    mask_weight_1 = np.abs(weights - 1.0) < 1e-6  # 重み=1.0の点
+    mask_weight_08 = np.abs(weights - 0.8) < 1e-6  # 重み=0.8の点
+    mask_weight_other = ~(mask_weight_1 | mask_weight_08)  # その他の重みの点
+    
+    if np.any(mask_weight_other):
+        ax1.scatter(freq[mask_weight_other], summary_h["observed"][mask_weight_other], 
+                   color="lightgray", s=12, alpha=0.5, label="実験データ(背景)", zorder=3)
+    if np.any(mask_weight_08):
+        ax1.scatter(freq[mask_weight_08], summary_h["observed"][mask_weight_08], 
+                   color="orange", s=16, alpha=0.7, label="実験データ(重み=0.8)", zorder=4)
+    if np.any(mask_weight_1):
+        ax1.scatter(freq[mask_weight_1], summary_h["observed"][mask_weight_1], 
+                   color="black", s=20, alpha=0.8, label="実験データ(重み=1.0)", zorder=5)
     ax1.set_ylabel("正規化透過率")
     ax1.set_title(f"モデル比較: 透過スペクトル @ {temperature:.0f} K")
     ax1.grid(True, linestyle="--", alpha=0.5)
