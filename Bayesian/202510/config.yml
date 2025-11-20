@@ -5,7 +5,8 @@
 # --- ファイルパス設定 ---
 file_paths:
   # OneDriveのパスは環境によって異なる可能性があるため注意
-  data_file: "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_Temperature.xlsx"
+  # data_file: "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_Temperature.xlsx"
+  data_file: "../../corrected_exp_datasets/Corrected_Transmittance_Temperature.xlsx"
   sheet_name: "Corrected Data"
   # 結果を出力する親ディレクトリ名
   results_parent_dir: "analysis_results"
@@ -13,7 +14,7 @@ file_paths:
 # --- 実行環境設定 ---
 execution:
   # GPU (NVIDIA CUDA) を使用するかどうか (true/false)
-  use_gpu: false
+  use_gpu: true
 
 # --- 物理パラメータ・初期値 ---
 physical_parameters:
@@ -53,7 +54,7 @@ analysis_settings:
     
     # 重み値設定  
     lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
-    between_peaks_weight: 0.3       # LP-UP間の重み
+    between_peaks_weight: 0.5       # LP-UP間の重み
     high_freq_peak_weight: 1.0      # 高周波ピークの重み
     background_weight: 0.01          # その他の領域の重み
     

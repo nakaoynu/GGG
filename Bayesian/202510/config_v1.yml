@@ -13,7 +13,7 @@ file_paths:
 # --- 実行環境設定 ---
 execution:
   # GPU (NVIDIA CUDA) を使用するかどうか (true/false)
-  use_gpu: false
+  use_gpu: true
 
 # --- 物理パラメータ・初期値 ---
 physical_parameters:
