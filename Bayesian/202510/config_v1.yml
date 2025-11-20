@@ -53,7 +53,7 @@ analysis_settings:
     
     # 重み値設定  
     lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
-    between_peaks_weight: 0.3       # LP-UP間の重み
+    between_peaks_weight: 0.6       # LP-UP間の重み
     high_freq_peak_weight: 1.0      # 高周波ピークの重み
     background_weight: 0.01          # その他の領域の重み
     

@@ -96,14 +96,17 @@ def print_loo_summary(loo_result: az.ELPDData, model_name: str) -> None:
     print(f"\np_loo (effective number of parameters):")
     print(f"  {loo_result.p_loo:.2f}")
     print(f"\nLOO-IC (lower is better):")
-    print(f"  {loo_result.loo:.2f}")
+    loo_ic = -2 * loo_result.elpd_loo
+    print(f"  {loo_ic:.2f}")
     
     # Pareto k診断
     if hasattr(loo_result, 'pareto_k'):
         k_values = loo_result.pareto_k
-        k_bad = np.sum(k_values > 0.7)
-        k_warning = np.sum((k_values > 0.5) & (k_values <= 0.7))
-        k_good = np.sum(k_values <= 0.5)
+        # xarray.DataArrayをnumpy配列に変換してから集計
+        k_array = np.asarray(k_values)
+        k_bad = int(np.sum(k_array > 0.7))
+        k_warning = int(np.sum((k_array > 0.5) & (k_array <= 0.7)))
+        k_good = int(np.sum(k_array <= 0.5))
         
         print(f"\nPareto k 診断:")
         print(f"  良好 (k ≤ 0.5): {k_good} 点")
@@ -224,7 +227,7 @@ def plot_loo_comparison(
     
     # LOO-IC比較
     ax4 = axes[1, 1]
-    loo_ic_values = [loo_h.loo, loo_b.loo]
+    loo_ic_values = [-2 * loo_h.elpd_loo, -2 * loo_b.elpd_loo]
     ax4.bar(x_pos, loo_ic_values, color=colors, alpha=0.7)
     ax4.set_xticks(x_pos)
     ax4.set_xticklabels(models)
@@ -253,7 +256,7 @@ def save_results_to_csv(
         'ELPD_loo': [loo_h.elpd_loo, loo_b.elpd_loo],
         'SE': [loo_h.se, loo_b.se],
         'p_loo': [loo_h.p_loo, loo_b.p_loo],
-        'LOO_IC': [loo_h.loo, loo_b.loo],
+        'LOO_IC': [-2 * loo_h.elpd_loo, -2 * loo_b.elpd_loo],
     })
     
     loo_summary_path = output_dir / "loo_summary.csv"

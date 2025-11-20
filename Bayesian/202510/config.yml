@@ -35,7 +35,7 @@ physical_parameters:
     B4: 0.000300       # B_formより小さい値を期待
     B6: 0.000030       # B_formに近い値
     gamma: 0.11e12
-    a_scale: 0.690     # B_form(0.669)より若干大きめを期待
+    a_scale: 0.690     
 
 # --- 解析条件設定 ---
 analysis_settings:
@@ -54,7 +54,11 @@ analysis_settings:
     
     # 重み値設定  
     lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
+<<<<<<< HEAD
     between_peaks_weight: 0.5       # LP-UP間の重み
+=======
+    between_peaks_weight: 0.8       # LP-UP間の重み
+>>>>>>> 5136ba45708c1550652893b91c1dec7be3a9b32d
     high_freq_peak_weight: 1.0      # 高周波ピークの重み
     background_weight: 0.01          # その他の領域の重み
     
