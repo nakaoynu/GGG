@@ -1,0 +1,191 @@
+# ================================================================
+# 磁場・温度一括ベイズ推定プログラム用 設定ファイル (config_unified.yml)
+# unified_weighted_bayesian_fitting.py 専用
+# ================================================================
+
+# --- ファイルパス設定 ---
+file_paths:
+  # データファイルのパス
+  data_file: "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_Temperature.xlsx"
+  sheet_name: "Corrected Data"
+  # 結果を出力する親ディレクトリ名
+  results_parent_dir: "analysis_results_unified"
+
+# --- 実行環境設定 ---
+execution:
+  # GPU (NVIDIA CUDA) を使用するかどうか (true/false)
+  use_gpu: false
+
+# --- 物理パラメータ・初期値 ---
+physical_parameters:
+  # 温度変化データの固定磁場 (Tesla)
+  B_fixed: 9.0
+  # 磁場変化データの固定温度 (Kelvin) - load_unified_data関数内で使用
+  T_fixed: 4.0
+  # 膜厚 (meter) - 固定値として使用
+  d_fixed: 157.8e-6
+  # スピン量子数
+  s: 3.5
+  # スピン密度 (m^-3)
+  N_spin: 1.9386e+28 # 24 / 1.238 * 1e27
+
+  # --- パラメータの初期値 ---
+  initial_values:
+    eps_bg: 14.20
+    g_factor: 1.990    # 初期値（ベイズ推定で更新される）
+    B4: 0.000300       # 結晶場パラメータB4の初期値
+    B6: 0.000030       # 結晶場パラメータB6の初期値
+    gamma: 0.11e12     # 減衰定数γの初期値
+    a_scale: 0.690     # スケーリング係数の初期値
+
+# --- 解析条件設定 ---
+analysis_settings:
+  # 温度・磁場データの自動検出設定
+  # - 温度列: 列名が'K'で終わる列を自動検出(例: '4K', '10K', '30K', '100K', '300K', ...)
+  # - 磁場列: 列名が'T'で終わる列を自動検出(例: '1T', '2T', '3T', ...)
+  # ※温度列と磁場列の両方が自動検出され、温度列を除外した上で磁場列が判定される
+  # ※Excelファイルにこれらの列がない場合は処理されない
+  
+  # 周波数領域のカットオフ値 (THz)
+  low_freq_cutoff: 0.361505   # 低周波カットオフ（現在未使用）
+  high_freq_cutoff: 0.45       # 高周波カットオフ（eps_bgフィッティング用）
+  
+  # --- 重み付け設定 ---
+  weight_settings:
+    # ピーク検出の閾値設定
+    peak_height_threshold: 0.01      # ピーク検出の最小高さ（正規化透過率）
+    peak_prominence_threshold: 0.05  # ピーク検出のプロミネンス閾値
+    peak_distance: 10                # ピーク間の最小距離（データ点数）
+    
+    # 重み値設定  
+    lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
+    between_peaks_weight: 0.5       # LP-UP間の重み
+    high_freq_peak_weight: 1.0      # 高周波ピークの重み
+    background_weight: 0.01         # その他の領域の重み（バックグラウンド）
+
+# --- ベイズ推定事前分布設定 ---
+bayesian_priors:
+  # 磁気パラメータの事前分布設定（初回実行時）
+  magnetic_parameters:
+    # a_scale パラメータ (HalfNormal分布)
+    # スケーリング係数、正の値のみ
+    a_scale:
+      distribution: "HalfNormal"
+      sigma: 1.0
+    
+    # g因子 (Normal分布)
+    # 中心値は initial_values.g_factor から自動取得
+    g_factor:
+      distribution: "Normal" 
+      sigma: 0.1
+    
+    # 結晶場パラメータ B4 (Normal分布)
+    # 中心値は initial_values.B4 から自動取得
+    B4:
+      distribution: "Normal"
+      sigma: 0.001
+    
+    # 結晶場パラメータ B6 (Normal分布)
+    # 中心値は initial_values.B6 から自動取得
+    B6:
+      distribution: "Normal"
+      sigma: 0.0001
+  
+  # 事前情報がある場合の設定（2回目以降の反復で使用）
+  with_prior_info:
+    # a_scale (Normal分布)
+    # 前回の推定結果を中心値として使用
+    a_scale:
+      distribution: "Normal"
+      sigma: 0.5  # より寛容な設定
+    
+    # g因子 
+    g_factor:
+      distribution: "Normal"
+      sigma: 0.1
+    
+    # B4
+    B4:
+      distribution: "Normal"
+      sigma: 0.001
+    
+    # B6
+    B6:
+      distribution: "Normal"
+      sigma: 0.0001
+  
+  # gamma（減衰定数）関連の事前分布設定
+  gamma_parameters:
+    # log(gamma)のベース値
+    log_gamma_mu_base:
+      distribution: "Normal"
+      sigma: 1.0
+      # 中心値は log(initial_values.gamma) から自動取得
+    
+    # log(gamma)の分散（各遷移間の相関を制御）
+    log_gamma_sigma_base:
+      distribution: "HalfNormal"
+      sigma: 0.3  # 小さい値でoffset間の相関を強める
+    
+    # 各遷移のoffset（7つの遷移に対応）
+    log_gamma_offset_base:
+      distribution: "Normal"
+      mu: 0.0
+      sigma: 0.3  # 小さい値で変動を抑える
+      shape: 7    # 7つの遷移（s=7/2の場合）
+    
+    # 温度依存性係数（線形項）
+    # gamma(T) = gamma_base * exp(temp_gamma_slope * (T - T_base))
+    temp_gamma_slope:
+      distribution: "Normal"
+      mu: 0.0
+      sigma: 0.01
+  
+  # ノイズパラメータ
+  noise_parameters:
+    sigma:
+      distribution: "HalfNormal"
+      sigma: 0.05
+
+# --- MCMCサンプリング設定 ---
+mcmc:
+  # サンプリング数（チェーンごと）
+  draws: 4000
+  # チューニング（warmup）期間
+  tune: 2000
+  # 並列チェーン数
+  chains: 4
+  # 受理率の目標値（高いほど慎重にサンプリング）
+  target_accept: 0.90
+  # パラメータ更新の反復回数
+  # 各反復でeps_bgを更新してベイズ推定を再実行
+  max_iterations: 2
+  # 初期化戦略
+  init: "adapt_diag"       # 適応的対角初期化
+  # 再現性確保のための乱数シード
+  random_seed: 42
+
+# --- データセット設定（統合処理用） ---
+dataset_config:
+  # 温度変化データの説明
+  temp_variable:
+    enabled: true
+    description: "温度を変数、磁場を固定したデータセット"
+    # B_fixedと自動検出された温度列('K'で終わる列)から自動生成
+  
+  # 磁場変化データの説明
+  field_variable:
+    enabled: true
+    description: "磁場を変数、温度を固定したデータセット"
+    # T_fixedと自動検出された磁場列('T'で終わる列)から生成
+
+# --- 出力設定 ---
+output:
+  # 保存するファイル
+  save_trace: true              # traceファイル（.nc）を保存
+  save_parameters: true         # パラメータCSVを保存
+  save_bt_params: true          # (B,T)別光学パラメータCSVを保存
+  
+  # プロット設定（将来の拡張用）
+  plot_posterior: false         # 事後分布プロット（未実装）
+  plot_spectra: false           # スペクトルプロット（未実装）
