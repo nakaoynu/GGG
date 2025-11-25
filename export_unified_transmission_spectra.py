@@ -60,8 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         choices=["H_form", "B_form", "both"],
-        default="H_form",
-        help="読み込むモデルトレースを選択 (デフォルト: H_form, both: 両モデルを比較)",
+        default="both",
+        help="読み込むモデルトレースを選択 (デフォルト: both, both: 両モデルを比較)",
     )
     parser.add_argument(
         "--samples",
@@ -107,11 +107,7 @@ def load_unified_data_for_export(config: Dict[str, Any]) -> Dict[Tuple[float, fl
     """全(B, T)データセットを読み込み、重み配列を生成する"""
     print("\n--- データ読み込み ---")
     
-    unified_data = uwbf.load_unified_data(
-        file_path=config['file_paths']['data_file'],
-        sheet_name=config['file_paths']['sheet_name'],
-        config=config
-    )
+    unified_data = uwbf.load_unified_data(config)
     
     # 全データセットを(B, T)キーの辞書に変換
     datasets = {}
@@ -135,7 +131,7 @@ def load_unified_data_for_export(config: Dict[str, Any]) -> Dict[Tuple[float, fl
 
 def load_bt_parameters(results_dir: pathlib.Path, model_type: str) -> Dict[Tuple[float, float], Dict]:
     """(B, T)ペア別の光学パラメータをCSVから読み込む"""
-    params_path = results_dir / f"temperature_optical_parameters_{model_type}.csv"
+    params_path = results_dir / f"bt_optical_parameters_{model_type}.csv"
     if not params_path.exists():
         raise FileNotFoundError(
             f"{model_type} の(B, T)パラメータが見つかりません: {params_path}"
@@ -288,7 +284,7 @@ def calculate_transmission_single(
     # 磁気感受率を計算
     chi_raw = uwbf.calculate_susceptibility(omega_eval, hamiltonian, temperature, gamma_array)
     g0 = a_scale * MU0 * n_spin * (g_factor * MUB) ** 2 / (2 * HBAR)
-    chi: np.ndarray = g0 * chi_raw
+    chi = g0 * chi_raw
 
     # モデルに応じて比透磁率を計算
     if model_type == "B_form":
@@ -460,15 +456,15 @@ def save_outputs(
     # 重み情報がある場合、重みに応じて色分けして表示
     weights = summary.get("weights", np.ones_like(freq))
     mask_weight_1 = np.abs(weights - 1.0) < 1e-6
-    mask_weight_01 = np.abs(weights - 0.1) < 1e-6
-    mask_weight_other = ~(mask_weight_1 | mask_weight_01)
+    mask_weight_mid = np.abs(weights - 0.1) < 1e-6
+    mask_weight_other = ~(mask_weight_1 | mask_weight_mid)
     
     if np.any(mask_weight_other):
         ax.scatter(freq[mask_weight_other], summary["observed"][mask_weight_other], 
                   color="lightgray", s=12, alpha=0.5, label="実験データ(背景)", zorder=3)
-    if np.any(mask_weight_01):
-        ax.scatter(freq[mask_weight_01], summary["observed"][mask_weight_01], 
-                  color="orange", s=16, alpha=0.7, label="実験データ(中間重み)", zorder=4)
+    if np.any(mask_weight_mid):
+        ax.scatter(freq[mask_weight_mid], summary["observed"][mask_weight_mid], 
+                  color="orange", s=16, alpha=0.7, label="実験データ(LP-UP間)", zorder=4)
     if np.any(mask_weight_1):
         ax.scatter(freq[mask_weight_1], summary["observed"][mask_weight_1], 
                   color="black", s=20, alpha=0.8, label="実験データ(ピーク)", zorder=5)
@@ -491,6 +487,7 @@ def save_comparison_outputs(
     temperature: float,
     summary_h: Dict[str, np.ndarray],
     summary_b: Dict[str, np.ndarray],
+    config: Dict[str, Any],
 ) -> None:
     """H_formとB_formの比較結果をCSVとPNGで保存"""
     freq = summary_h["frequency_thz"]
@@ -527,20 +524,24 @@ def save_comparison_outputs(
              label="B_form MAP推定値", linestyle='-')
     
     # 重み情報がある場合、重みに応じて色分けして表示
+    weight_settings = config['analysis_settings'].get('weight_settings', {})
+    w_high = float(weight_settings['lp_up_peak_weight'])
+    w_mid = float(weight_settings['between_peaks_weight'])
+    
     weights = summary_h.get("weights", np.ones_like(freq))
-    mask_weight_1 = np.abs(weights - 1.0) < 1e-6
-    mask_weight_01 = np.abs(weights - 0.1) < 1e-6
-    mask_weight_other = ~(mask_weight_1 | mask_weight_01)
+    mask_weight_1 = np.abs(weights - w_high) < 1e-6
+    mask_weight_mid = np.abs(weights - w_mid) < 1e-6
+    mask_weight_other = ~(mask_weight_1 | mask_weight_mid)
     
     if np.any(mask_weight_other):
         ax1.scatter(freq[mask_weight_other], summary_h["observed"][mask_weight_other], 
                    color="lightgray", s=12, alpha=0.5, label="実験データ(背景)", zorder=3)
-    if np.any(mask_weight_01):
-        ax1.scatter(freq[mask_weight_01], summary_h["observed"][mask_weight_01], 
-                   color="orange", s=16, alpha=0.7, label="実験データ(中間重み)", zorder=4)
+    if np.any(mask_weight_mid):
+        ax1.scatter(freq[mask_weight_mid], summary_h["observed"][mask_weight_mid], 
+                   color="orange", s=16, alpha=0.7, label=f"実験データ(LP-UP間 w={w_mid})", zorder=4)
     if np.any(mask_weight_1):
         ax1.scatter(freq[mask_weight_1], summary_h["observed"][mask_weight_1], 
-                   color="black", s=20, alpha=0.8, label="実験データ(ピーク)", zorder=5)
+                   color="black", s=20, alpha=0.8, label=f"実験データ(ピーク w={w_high})", zorder=5)
     
     ax1.set_ylabel("正規化透過率")
     ax1.set_title(f"モデル比較: 透過スペクトル @ B={b_field:.1f}T, T={temperature:.0f}K")
@@ -658,7 +659,7 @@ def main() -> None:
             )
             
             # 比較プロットを保存
-            save_comparison_outputs(output_dir, B, T, summary_h, summary_b)
+            save_comparison_outputs(output_dir, B, T, summary_h, summary_b, config)
             
             # 個別モデルの結果も保存
             save_outputs(output_dir, "H_form", B, T, summary_h)

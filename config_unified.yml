@@ -5,11 +5,23 @@
 
 # --- ファイルパス設定 ---
 file_paths:
-  # データファイルのパス
-  data_file: "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_Temperature.xlsx"
-  sheet_name: "Corrected Data"
+  # 複数データファイル対応
+  # 各ファイルから温度列('K'で終わる)と磁場列('T'で終わる)を自動検出
+  data_files:
+    # 温度変化データファイル
+    - file: "bayesian_inputs\\BayesianInput_Raw_Transmittance_Temperature.xlsx"
+      sheet: "Normalized Data"
+      type: "temperature"
+      description: "温度変化データ (B=9.0T固定)"
+    
+    # 磁場変化データファイル
+    - file: "bayesian_inputs\\BayesianInput_Raw_Transmittance_Field.xlsx"
+      sheet: "Normalized Data"
+      type: "field"
+      description: "磁場変化データ (T=4K固定)"
+  
   # 結果を出力する親ディレクトリ名
-  results_parent_dir: "analysis_results_unified"
+  results_parent_dir: "fullsize_analysis_results_unified"
 
 # --- 実行環境設定 ---
 execution:
@@ -36,7 +48,7 @@ physical_parameters:
     B4: 0.000300       # 結晶場パラメータB4の初期値
     B6: 0.000030       # 結晶場パラメータB6の初期値
     gamma: 0.11e12     # 減衰定数γの初期値
-    a_scale: 0.690     # スケーリング係数の初期値
+    a_scale: 0.70     # スケーリング係数の初期値
 
 # --- 解析条件設定 ---
 analysis_settings:
@@ -54,12 +66,12 @@ analysis_settings:
   weight_settings:
     # ピーク検出の閾値設定
     peak_height_threshold: 0.01      # ピーク検出の最小高さ（正規化透過率）
-    peak_prominence_threshold: 0.05  # ピーク検出のプロミネンス閾値
+    peak_prominence_threshold: 0.04  # ピーク検出のプロミネンス閾値
     peak_distance: 10                # ピーク間の最小距離（データ点数）
     
     # 重み値設定  
     lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
-    between_peaks_weight: 0.5       # LP-UP間の重み
+    between_peaks_weight: 0.1       # LP-UP間の重み
     high_freq_peak_weight: 1.0      # 高周波ピークの重み
     background_weight: 0.01         # その他の領域の重み（バックグラウンド）
 
@@ -164,6 +176,8 @@ mcmc:
   init: "adapt_diag"       # 適応的対角初期化
   # 再現性確保のための乱数シード
   random_seed: 42
+  # GPU並列計算用のサンプラーを指定（カスタムOpと非互換のためコメントアウト）
+  # nuts_sampler: "numpyro"  
 
 # --- データセット設定（統合処理用） ---
 dataset_config:
@@ -185,7 +199,3 @@ output:
   save_trace: true              # traceファイル（.nc）を保存
   save_parameters: true         # パラメータCSVを保存
   save_bt_params: true          # (B,T)別光学パラメータCSVを保存
-  
-  # プロット設定（将来の拡張用）
-  plot_posterior: false         # 事後分布プロット（未実装）
-  plot_spectra: false           # スペクトルプロット（未実装）

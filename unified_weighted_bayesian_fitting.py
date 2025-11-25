@@ -15,23 +15,64 @@
 # 【データ要件】
 # Excelファイルに以下のデータが必要:
 # - 温度変化データ: 各温度列 (例: '4K', '10K', '20K', ...)
-# - 磁場変化データ: 各磁場列 (例: '1T', '2T', '3T', ...) 
+# - 磁場変化データ: 各磁場列 (例: '1T', '2T', '3T', ...)
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import pymc as pm
-import arviz as az
-import pytensor.tensor as pt
-from pytensor.graph.op import Op
+print("="*70)
+print("磁場・温度一括ベイズ推定プログラム")
+print("="*70)
+print("\n⏳ ライブラリを読み込み中... (初回は2-5分程度かかる場合があります)")
+print("   Ctrl+Cで中断しないでください\n")
+
+import time
+_import_start = time.time()
+
 import os
 import pathlib
 import yaml
+
+# ライブラリインポート前に設定ファイルを一時的に読み込んでGPU設定を確認する
+def pre_load_gpu_config():
+    try:
+        config_path = pathlib.Path(__file__).parent / "config_unified.yml"
+        with open(config_path, 'r', encoding='utf-8') as f:
+            temp_config = yaml.safe_load(f)
+        if temp_config.get('execution', {}).get('use_gpu', False):
+            print("🚀 GPU (CUDA) 設定を適用します...")
+            os.environ['PYTENSOR_FLAGS'] = 'device=cuda,floatX=float64'
+        else:
+            print("💻 CPU 設定を使用します...")
+            os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64'
+    except Exception as e:
+        print(f"⚠️ GPU設定読み込み失敗: {e} -> CPUを使用します")
+
+pre_load_gpu_config()
+
 import datetime
 import warnings
+print("  [✓] 標準ライブラリ")
+
+import numpy as np
+print("  [✓] numpy")
+import pandas as pd
+print("  [✓] pandas")
+import matplotlib.pyplot as plt
+print("  [✓] matplotlib")
+import arviz as az
+print("  [✓] arviz")
+
+print("  [⏳] pymc (これが最も時間がかかります)...")
+import pymc as pm
+print("  [✓] pymc")
+import pytensor.tensor as pt
+from pytensor.graph.op import Op
+print("  [✓] pytensor")
 from typing import List, Dict, Any, Tuple, Optional, Union
 from scipy.signal import find_peaks, peak_widths
 from scipy.optimize import curve_fit
+print("  [✓] scipy")
+
+_import_time = time.time() - _import_start
+print(f"\n✅ 全ライブラリの読み込み完了! (所要時間: {_import_time:.1f}秒)\n")
 
 # 数値計算の警告を抑制
 warnings.filterwarnings('ignore', category=RuntimeWarning)
@@ -57,11 +98,17 @@ def load_config(config_path: Optional[Union[str, pathlib.Path]] = None) -> Dict[
     if config_path is None:
         config_path = pathlib.Path(__file__).parent / "config_unified.yml"
     
-    # デフォルト設定値（weighted_bayesian_fitting_completed.pyと同じ）
+    # デフォルト設定値（複数ファイル対応）
     default_config = {
         'file_paths': {
-            'data_file': "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_Temperature.xlsx",
-            'sheet_name': "Corrected Data",
+            'data_files': [
+                {
+                    'file': "C:\\Users\\taich\\OneDrive - YNU(ynu.jp)\\master\\磁性\\GGG\\Programs\\corrected_exp_datasets\\Corrected_Transmittance_Temperature.xlsx",
+                    'sheet': "Corrected Data",
+                    'type': "auto",
+                    'description': "デフォルトデータファイル"
+                }
+            ],
             'results_parent_dir': "analysis_results_unified"
         },
         'execution': {'use_gpu': False},
@@ -99,6 +146,7 @@ def load_config(config_path: Optional[Union[str, pathlib.Path]] = None) -> Dict[
             'target_accept': 0.90,
             'init': "adapt_diag",
             'max_iterations': 2
+            
         },
         'bayesian_priors': {
             'magnetic_parameters': {
@@ -137,6 +185,21 @@ def load_config(config_path: Optional[Union[str, pathlib.Path]] = None) -> Dict[
                     default[key] = value
         
         merge_dict(default_config, user_config)
+        
+        # 数値パラメータの型変換を確実に実行
+        try:
+            initial_vals = default_config['physical_parameters']['initial_values']
+            for key in ['eps_bg', 'g_factor', 'B4', 'B6', 'gamma', 'a_scale']:
+                if key in initial_vals:
+                    initial_vals[key] = float(initial_vals[key])
+            
+            phys_params = default_config['physical_parameters']
+            for key in ['B_fixed', 'T_fixed', 'd_fixed', 's', 'N_spin']:
+                if key in phys_params:
+                    phys_params[key] = float(phys_params[key])
+        except (KeyError, ValueError, TypeError) as e:
+            print(f"⚠️ 警告: パラメータの型変換中にエラー: {e}")
+        
         print(f"✅ 設定ファイル '{config_path}' を読み込みました。")
         
     except FileNotFoundError:
@@ -337,7 +400,16 @@ def create_frequency_weights(dataset: Dict[str, Any], analysis_settings: Dict[st
         up_fwhm_mask = (freq >= left_freq[up_idx_in_all_peaks]) & (freq <= right_freq[up_idx_in_all_peaks])
         weights[lp_fwhm_mask] = weight_config['lp_up_peak_weight']
         weights[up_fwhm_mask] = weight_config['lp_up_peak_weight']
-    
+    elif len(low_freq_peaks) == 1:
+        # 【11/25追加】 ピークが1個しかない場合の処理
+        target_peak = low_freq_peaks[0]
+        idx_in_all_peaks = np.where(peaks == target_peak)[0][0]
+        
+        # その1個のピークの半値幅領域に重みを付ける
+        fwhm_mask = (freq >= left_freq[idx_in_all_peaks]) & (freq <= right_freq[idx_in_all_peaks])
+        weights[fwhm_mask] = weight_config['lp_up_peak_weight']
+        
+        print(f"  (Info) 低周波ピークが1つのみ検出されました: {freq[target_peak]:.3f} THz")
     high_freq_peak_indices = np.where(freq[peaks] >= high_freq_cutoff)[0]
     for idx_in_all_peaks in high_freq_peak_indices:
         fwhm_mask = (freq >= left_freq[idx_in_all_peaks]) & (freq <= right_freq[idx_in_all_peaks])
@@ -347,86 +419,127 @@ def create_frequency_weights(dataset: Dict[str, Any], analysis_settings: Dict[st
     return weights
 
 # --- データ読み込み関数 ---
-def load_unified_data(file_path: str, sheet_name: str, config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+def load_unified_data(config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     """
-    温度変化データと磁場変化データを統一的に読み込む
+    複数のExcelファイルから温度変化データと磁場変化データを統一的に読み込む
     
-    Returns:
+    Parameters
+    ----------
+    config : Dict[str, Any]
+        設定辞書（file_paths.data_filesに複数ファイル情報を含む）
+    
+    Returns
+    -------
+    Dict[str, List[Dict[str, Any]]]
         {
             'temp_variable': [データセット1, データセット2, ...],  # 温度変数、磁場固定
             'field_variable': [データセット1, データセット2, ...]  # 磁場変数、温度固定
         }
     """
-    print("\n--- 統合データ読み込み ---")
+    print("\n--- 統合データ読み込み (複数ファイル対応) ---")
     
-    try:
-        df = pd.read_excel(file_path, sheet_name=sheet_name, header=0)
-    except Exception as e:
-        raise FileNotFoundError(f"Excelファイル '{file_path}' が読み込めません: {e}")
+    all_temp_datasets = []
+    all_field_datasets = []
+    
+    # 旧形式(単一ファイル)との後方互換性
+    if 'data_file' in config['file_paths']:
+        print("⚠️ 旧形式の設定ファイルを検出しました。単一ファイルモードで動作します。")
+        file_configs = [{
+            'file': config['file_paths']['data_file'],
+            'sheet': config['file_paths'].get('sheet_name', 'Corrected Data'),
+            'description': '単一ファイル(互換モード)'
+        }]
+    else:
+        file_configs = config['file_paths'].get('data_files', [])
+    
+    if not file_configs:
+        raise ValueError("設定ファイルにdata_filesが定義されていません")
     
     freq_col = 'Frequency (THz)'
-    df[freq_col] = pd.to_numeric(df[freq_col], errors='coerce')
-    
-    # 温度変化データ（磁場固定） - 列名パターン自動検出: 'K'で終わる列
-    temp_cols = [col for col in df.columns if col.endswith('K') and col != freq_col]
     B_fixed = config['physical_parameters']['B_fixed']
-    temp_variable_datasets = []
+    T_fixed = config['physical_parameters'].get('T_fixed', 4.0)
     
-    print(f"\n📊 温度変化データ (磁場固定: B={B_fixed}T)")
-    print(f"  検出された温度列: {temp_cols}")
-    for col in temp_cols:
+    # 各ファイルを処理
+    for file_idx, file_config in enumerate(file_configs, 1):
+        file_path = file_config['file']
+        sheet_name = file_config['sheet']
+        description = file_config.get('description', '')
+        
+        print(f"\n📁 ファイル {file_idx}/{len(file_configs)}: {pathlib.Path(file_path).name}")
+        if description:
+            print(f"   説明: {description}")
+        print(f"   シート: {sheet_name}")
+        
         try:
-            temp_value = float(col.replace('K', ''))
-            df_clean = df[[freq_col, col]].dropna()
-            freq, trans = df_clean[freq_col].values.astype(np.float64), df_clean[col].values.astype(np.float64)
+            df = pd.read_excel(file_path, sheet_name=sheet_name, header=0)
+        except Exception as e:
+            print(f"   ❌ ファイル読み込みエラー: {e}")
+            print(f"   スキップします。")
+            continue
+        
+        df[freq_col] = pd.to_numeric(df[freq_col], errors='coerce')
+        
+        # 温度変化データの処理（'K'で終わる列を自動検出）
+        temp_cols = [col for col in df.columns if col.endswith('K') and col != freq_col]
+        
+        if temp_cols:
+            print(f"   📊 温度変化データ (B={B_fixed}T固定)")
+            print(f"      検出された温度列: {temp_cols}")
             
-            temp_variable_datasets.append({
-                'temperature': temp_value,
-                'b_field': B_fixed,
-                'frequency': freq,
-                'transmittance_full': trans,
-                'omega': freq * 1e12 * 2 * np.pi,
-                'pattern': 'temp_variable'
-            })
-            print(f"  ✓ T={temp_value}K, B={B_fixed}T (データ点数: {len(freq)})")
-        except ValueError:
-            print(f"⚠️ 列 '{col}' は温度データとして解釈できません。スキップします。")
+            for col in temp_cols:
+                try:
+                    temp_value = float(col.replace('K', ''))
+                    df_clean = df[[freq_col, col]].dropna()
+                    freq, trans = df_clean[freq_col].values.astype(np.float64), df_clean[col].values.astype(np.float64)
+                    
+                    all_temp_datasets.append({
+                        'temperature': temp_value,
+                        'b_field': B_fixed,
+                        'frequency': freq,
+                        'transmittance_full': trans,
+                        'omega': freq * 1e12 * 2 * np.pi,
+                        'pattern': 'temp_variable',
+                        'source_file': pathlib.Path(file_path).name
+                    })
+                    print(f"      ✓ T={temp_value}K, B={B_fixed}T (データ点数: {len(freq)})")
+                except ValueError:
+                    print(f"      ⚠️ 列 '{col}' は温度データとして解釈できません。")
+        
+        # 磁場変化データの処理（'T'で終わる列を自動検出、温度列を除外）
+        field_cols = [col for col in df.columns if col.endswith('T') and col != freq_col and col not in temp_cols]
+        
+        if field_cols:
+            print(f"   📊 磁場変化データ (T={T_fixed}K固定)")
+            print(f"      検出された磁場列: {field_cols}")
+            
+            for col in field_cols:
+                try:
+                    B_value = float(col.replace('T', ''))
+                    df_clean = df[[freq_col, col]].dropna()
+                    freq, trans = df_clean[freq_col].values.astype(np.float64), df_clean[col].values.astype(np.float64)
+                    
+                    all_field_datasets.append({
+                        'temperature': T_fixed,
+                        'b_field': B_value,
+                        'frequency': freq,
+                        'transmittance_full': trans,
+                        'omega': freq * 1e12 * 2 * np.pi,
+                        'pattern': 'field_variable',
+                        'source_file': pathlib.Path(file_path).name
+                    })
+                    print(f"      ✓ T={T_fixed}K, B={B_value}T (データ点数: {len(freq)})")
+                except ValueError:
+                    print(f"      ⚠️ 列 '{col}' は磁場データとして解釈できません。")
     
-    # 磁場変化データ(温度固定) - 列名パターン自動検出: 'T'で終わる列(温度列を除く)
-    field_cols = [col for col in df.columns if col.endswith('T') and col != freq_col and col not in temp_cols]
-    T_fixed = config['physical_parameters'].get('T_fixed', 4.0)  # 設定ファイルから取得
-    field_variable_datasets = []
-    
-    if field_cols:
-        print(f"\n📊 磁場変化データ (温度固定: T={T_fixed}K)")
-        print(f"  検出された磁場列: {field_cols}")
-        for col in field_cols:
-            try:
-                B_value = float(col.replace('T', ''))
-                df_clean = df[[freq_col, col]].dropna()
-                freq, trans = df_clean[freq_col].values.astype(np.float64), df_clean[col].values.astype(np.float64)
-                
-                field_variable_datasets.append({
-                    'temperature': T_fixed,
-                    'b_field': B_value,
-                    'frequency': freq,
-                    'transmittance_full': trans,
-                    'omega': freq * 1e12 * 2 * np.pi,
-                    'pattern': 'field_variable'
-                })
-                print(f"  ✓ T={T_fixed}K, B={B_value}T (データ点数: {len(freq)})")
-            except ValueError:
-                print(f"⚠️ 列 '{col}' は磁場データとして解釈できません。スキップします。")
-    else:
-        print(f"\n⚠️ 磁場変化データが見つかりませんでした。温度変化データのみ処理します。")
-    
-    print(f"\n✅ データ読み込み完了:")
-    print(f"  - 温度変化データ: {len(temp_variable_datasets)} データセット")
-    print(f"  - 磁場変化データ: {len(field_variable_datasets)} データセット")
+    print(f"\n" + "="*70)
+    print(f"✅ 全ファイルの読み込み完了:")
+    print(f"  - 温度変化データ: {len(all_temp_datasets)} データセット")
+    print(f"  - 磁場変化データ: {len(all_field_datasets)} データセット")
+    print(f"="*70)
     
     return {
-        'temp_variable': temp_variable_datasets,
-        'field_variable': field_variable_datasets
+        'temp_variable': all_temp_datasets,
+        'field_variable': all_field_datasets
     }
 
 def split_data_by_frequency(datasets: List[Dict[str, Any]], 
@@ -640,9 +753,14 @@ def create_prior_distributions(prior_config: Dict[str, Any],
 
 def create_gamma_priors(gamma_config: Dict[str, Any], gamma_init: float) -> Dict[str, Any]:
     """gamma事前分布を作成"""
+    # gamma_initを確実にfloatに変換
+    gamma_init_float = float(gamma_init)
+    if gamma_init_float <= 0:
+        raise ValueError(f"gamma_init must be positive, got {gamma_init_float}")
+    
     gamma_priors = {}
     gamma_priors['log_gamma_mu_base'] = pm.Normal('log_gamma_mu_base', 
-                                                  mu=np.log(gamma_init), 
+                                                  mu=np.log(gamma_init_float), 
                                                   sigma=gamma_config['log_gamma_mu_base']['sigma'])
     gamma_priors['log_gamma_sigma_base'] = pm.HalfNormal('log_gamma_sigma_base', 
                                                          sigma=gamma_config['log_gamma_sigma_base']['sigma'])
@@ -683,8 +801,11 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
         B6 = magnetic_priors['B6']
         
         # gamma事前分布
+        gamma_init = initial_values['gamma']
+        print(f"  gamma初期値: {gamma_init} (型: {type(gamma_init).__name__})")
+        
         gamma_priors = create_gamma_priors(prior_config['gamma_parameters'], 
-                                          initial_values['gamma'])
+                                          gamma_init)
         log_gamma_mu_base = gamma_priors['log_gamma_mu_base']
         log_gamma_sigma_base = gamma_priors['log_gamma_sigma_base']
         log_gamma_offset_base = gamma_priors['log_gamma_offset_base']
@@ -766,6 +887,10 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
                 'progressbar': True,
                 'idata_kwargs': {'log_likelihood': True}
             }
+
+            if 'nuts_sampler' in mcmc_config:
+                sample_kwargs['nuts_sampler'] = mcmc_config['nuts_sampler']
+                print(f"🚀 高速サンプラーを使用: {mcmc_config['nuts_sampler']}")
             
             trace = pm.sample(**sample_kwargs)
             print("✅ ベイズサンプリングが正常に完了しました。")
@@ -851,11 +976,7 @@ def main():
     print("ステップ1: データ読み込み")
     print("="*70)
     
-    unified_data = load_unified_data(
-        file_path=config['file_paths']['data_file'],
-        sheet_name=config['file_paths']['sheet_name'],
-        config=config
-    )
+    unified_data = load_unified_data(config)
     
     # 全データセットを結合
     all_datasets = unified_data['temp_variable'] + unified_data['field_variable']
