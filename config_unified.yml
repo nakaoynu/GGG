@@ -26,7 +26,7 @@ file_paths:
 # --- 実行環境設定 ---
 execution:
   # GPU (NVIDIA CUDA) を使用するかどうか (true/false)
-  use_gpu: true
+  use_gpu: false
 
 # --- 物理パラメータ・初期値 ---
 physical_parameters:
@@ -71,7 +71,7 @@ analysis_settings:
     
     # 重み値設定  
     lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
-    between_peaks_weight: 0.1       # LP-UP間の重み
+    between_peaks_weight: 0.6       # LP-UP間の重み
     high_freq_peak_weight: 1.0      # 高周波ピークの重み
     background_weight: 0.01         # その他の領域の重み（バックグラウンド）
 
@@ -162,9 +162,9 @@ bayesian_priors:
 # --- MCMCサンプリング設定 ---
 mcmc:
   # サンプリング数（チェーンごと）
-  draws: 4000
+  draws: 3000
   # チューニング（warmup）期間
-  tune: 2000
+  tune: 1000
   # 並列チェーン数
   chains: 4
   # 受理率の目標値（高いほど慎重にサンプリング）
@@ -177,7 +177,7 @@ mcmc:
   # 再現性確保のための乱数シード
   random_seed: 42
   # GPU並列計算用のサンプラーを指定（カスタムOpと非互換のためコメントアウト）
-  nuts_sampler: "numpyro"  
+  # nuts_sampler: "numpyro"  
 
 # --- データセット設定（統合処理用） ---
 dataset_config:

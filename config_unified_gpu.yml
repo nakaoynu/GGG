@@ -83,24 +83,28 @@ bayesian_priors:
     
     # g因子 (Normal分布)
     g_factor:
-      distribution: "Normal" 
+      distribution: "Normal"
+      mu: 2.0
       sigma: 0.1
     
     # 結晶場パラメータ B4 (Normal分布)
     B4:
       distribution: "Normal"
-      sigma: 0.001
+      mu: 0.0005
+      sigma: 0.0001
     
     # 結晶場パラメータ B6 (Normal分布)
     B6:
       distribution: "Normal"
-      sigma: 0.0001
+      mu: 0.00005
+      sigma: 0.00001
   
   # gamma（減衰定数）関連の事前分布設定
   gamma_parameters:
     # log(gamma)のベース値
     log_gamma_mu_base:
       distribution: "Normal"
+      mu: 25.0
       sigma: 1.0
     
     # log(gamma)の分散

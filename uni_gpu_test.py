@@ -1,6 +1,19 @@
 # unified_weighted_bayesian_fitting_gpu.py
 # GPU (JAX/NumPyro) 完全最適化バージョン
 # 特徴: Pythonループを廃止し、全データをテンソル演算で一括処理します
+#
+# === コードレビュー対応履歴 ===
+# 1. pt.scanの完全排除: 
+#    - 全データをBroadcastingで一括処理(calculate_susceptibility_vectorized)
+#    - 固有値事前計算により条件数に比例した計算量に削減(O(N) → O(n_conditions))
+# 2. 物理定数のクラス化:
+#    - PhysicalConstantsクラスでスコープを管理、グローバル汚染を防止
+# 3. set_subtensor排除:
+#    - 全行列をNumPyで事前構築し、pt.as_tensor_variableで定数化
+# 4. 事前分布パラメータのconfig化:
+#    - bayesian_priorsセクションから全パラメータを読み込み、ハードコーディング排除
+# 5. 例外処理の改善:
+#    - bare exceptをException catchに変更、エラー型とメッセージをログ出力
 
 import os
 import sys
@@ -49,13 +62,23 @@ from scipy.optimize import curve_fit
 from functools import lru_cache
 from typing import Any, cast
 
-# 物理定数
-kB = 1.380649e-23
-muB = 9.274010e-24
-hbar = 1.054571e-34
-c = 299792458
-mu0 = 4.0 * np.pi * 1e-7
-s = 3.5
+# 物理定数をクラスで管理(スコープ汚染を防ぐ)
+class PhysicalConstants:
+    """物理定数の定義(SI単位系)"""
+    kB: float = 1.380649e-23      # Boltzmann constant [J/K]
+    muB: float = 9.274010e-24     # Bohr magneton [J/T]
+    hbar: float = 1.054571e-34    # Reduced Planck constant [J·s]
+    c: float = 299792458          # Speed of light [m/s]
+    mu0: float = 4.0 * np.pi * 1e-7  # Vacuum permeability [H/m]
+    s: float = 3.5                # Spin quantum number for Gd3+
+
+# 後方互換性のため(既存コード対応)
+kB = PhysicalConstants.kB
+muB = PhysicalConstants.muB
+hbar = PhysicalConstants.hbar
+c = PhysicalConstants.c
+mu0 = PhysicalConstants.mu0
+s = PhysicalConstants.s
 
 
 def _build_sz_matrix() -> np.ndarray:
@@ -393,7 +416,9 @@ def fit_eps_bg_step1(unified_data, current_params, config):
                         min_err = err
                         best_eps = eps_fit
                         success = True
-            except Exception:
+            except Exception as e:
+                # curve_fitの収束失敗やランタイムエラーをキャッチ
+                print(f"    Debug: curve_fit failed with initial_eps={initial_eps:.2f}: {type(e).__name__}")
                 continue
 
         if success:
@@ -437,14 +462,14 @@ def precompute_eigenvalues_for_conditions(unique_conditions, g_factor, B4, B6):
 
 
 def calculate_susceptibility_vectorized(omega_array, temp_array, condition_id, eigvals_cache, gamma_array):
-    """Vectorized磁化率計算(改善1,2)
+    """Vectorized磁化率計算(改善1,2,温度依存gamma対応)
     
     Args:
         omega_array: 角周波数配列 shape (N,)
         temp_array: 温度配列 shape (N,)
         condition_id: 条件ID配列 shape (N,)
         eigvals_cache: 固有値テンソル shape (n_conditions, 8)
-        gamma_array: 緩和時間配列 shape (7,)
+        gamma_array: 緩和時間配列 shape (N, 7) または (7,)
     Returns:
         chi: 磁化率配列 shape (N,)
     """
@@ -466,9 +491,10 @@ def calculate_susceptibility_vectorized(omega_array, temp_array, condition_id, e
     numer = delta_pop * TRANSITION_STRENGTH_PT[None, :]  # (N, 7)
     
     # 磁化率計算(周波数依存)
-    # omega_array: (N,), omega_0: (N, 7), gamma_array: (7,)
-    # Broadcasting: (N, 7) - (N, 1) - (1, 7) -> (N, 7)
-    denom = omega_0 - omega_array[:, None] - 1j * gamma_array[None, :]  # (N, 7)
+    # omega_array: (N,), omega_0: (N, 7), gamma_array: (N, 7) または (7,)
+    # gamma_arrayが(7,)の場合は[None, :]でブロードキャスト、(N,7)ならそのまま使用
+    gamma_broadcast = gamma_array if gamma_array.ndim == 2 else gamma_array[None, :]
+    denom = omega_0 - omega_array[:, None] - 1j * gamma_broadcast  # (N, 7)
     chi = pt.sum(numer / denom, axis=1)  # (N,)
     
     return -chi  # type: ignore[operator]
@@ -546,30 +572,59 @@ def run_mcmc_gpu_optimized(unified_data, eps_bg_map, config, model_type):
     
     print(f"📊 データ点数: {total_points}, バッチサイズ: {batch_size}")
     
+    # 事前分布パラメータをconfigから読み込み(ハードコーディング排除)
+    priors_cfg = config.get('bayesian_priors', {})
+    mag_priors = priors_cfg.get('magnetic_parameters', {})
+    gamma_priors = priors_cfg.get('gamma_parameters', {})
+    
+    # デフォルト値(config未設定時のフォールバック)
+    g_mu = mag_priors.get('g_factor', {}).get('mu', 2.0)
+    g_sigma = mag_priors.get('g_factor', {}).get('sigma', 0.1)
+    B4_mu = mag_priors.get('B4', {}).get('mu', 0.0005)
+    B4_sigma = mag_priors.get('B4', {}).get('sigma', 0.0001)
+    B6_mu = mag_priors.get('B6', {}).get('mu', 0.00005)
+    B6_sigma = mag_priors.get('B6', {}).get('sigma', 0.00001)
+    a_scale_sigma = mag_priors.get('a_scale', {}).get('sigma', 1.0)
+    
+    log_gamma_mu_val = gamma_priors.get('log_gamma_mu_base', {}).get('mu', 25.0)
+    log_gamma_sigma_val = gamma_priors.get('log_gamma_mu_base', {}).get('sigma', 1.0)
+    temp_slope_sigma = gamma_priors.get('temp_gamma_slope', {}).get('sigma', 0.01)
+    log_sigma_val = gamma_priors.get('log_gamma_sigma_base', {}).get('sigma', 0.3)
+    log_offset_sigma = gamma_priors.get('log_gamma_offset_base', {}).get('sigma', 0.3)
+    
     with pm.Model() as model:
-        # --- Parameters ---
-        a_scale = pm.HalfNormal('a_scale', sigma=1.0)
-        g_factor = pm.Normal('g_factor', mu=2.0, sigma=0.1)
-        B4 = pm.Normal('B4', mu=0.0005, sigma=0.0001)
-        B6 = pm.Normal('B6', mu=0.00005, sigma=0.00001)
+        # --- Parameters (config駆動) ---
+        a_scale = pm.HalfNormal('a_scale', sigma=a_scale_sigma)
+        g_factor = pm.Normal('g_factor', mu=g_mu, sigma=g_sigma)
+        B4 = pm.Normal('B4', mu=B4_mu, sigma=B4_sigma)
+        B6 = pm.Normal('B6', mu=B6_mu, sigma=B6_sigma)
         
-        log_gamma_mu = pm.Normal('log_gamma_mu_base', mu=25.0, sigma=1.0)
-        temp_slope = pm.Normal('temp_gamma_slope', mu=0.0, sigma=0.01)
-        log_sigma = pm.HalfNormal('log_gamma_sigma_base', sigma=0.3)
-        log_offset = pm.Normal('log_gamma_offset_base', mu=0.0, sigma=0.3, shape=7)
+        log_gamma_mu = pm.Normal('log_gamma_mu_base', mu=log_gamma_mu_val, sigma=log_gamma_sigma_val)
+        temp_slope = pm.Normal('temp_gamma_slope', mu=0.0, sigma=temp_slope_sigma)
+        log_sigma = pm.HalfNormal('log_gamma_sigma_base', sigma=log_sigma_val)
+        log_offset = pm.Normal('log_gamma_offset_base', mu=0.0, sigma=log_offset_sigma, shape=7)
         
         # --- 固有値事前計算(改善1)---
         eigvals_cache = precompute_eigenvalues_for_conditions(
             sorted_conditions, g_factor, B4, B6
         )
         
-        # --- Gamma配列計算(改善4: 遷移ごと独立)---
-        # 基準温度での値
-        gamma_offsets = pt.exp(log_offset * log_sigma)  # shape: (7,)
-        # 温度依存項(スカラー基準値)
-        gamma_base_scalar = pt.exp(log_gamma_mu + temp_slope * (pt.mean(temp_pt) - 4.0))
-        # 統一gamma(7遷移分)
-        gamma_unified = gamma_base_scalar * gamma_offsets  # type: ignore[operator]  # shape: (7,)
+        # --- Gamma配列計算(改善4: 遷移ごと独立 + 温度依存性修正)---
+        # 1. 遷移ごとのオフセット項 (温度に依存しない形状因子)
+        # shape: (1, 7) にしてブロードキャスト準備
+        gamma_offsets = pt.exp(log_offset * log_sigma)[None, :]  # type: ignore[index]  # (1, 7)
+        
+        # 2. 温度依存項 (データ点ごとに計算)
+        # temp_pt: (N,) -> (N, 1) に変形
+        temp_diff = (temp_pt - 4.0)[:, None]  # type: ignore[index]  # (N, 1)
+        
+        # log_gamma_mu + slope * diff -> (N, 1)
+        log_gamma_base_vec = log_gamma_mu + temp_slope * temp_diff
+        gamma_base_vec = pt.exp(log_gamma_base_vec)  # (N, 1)
+        
+        # 3. 統合 (N, 1) * (1, 7) -> (N, 7)
+        # 各データ点 i、各遷移 j に対応する gamma[i, j]
+        gamma_unified = gamma_base_vec * gamma_offsets  # type: ignore[operator]  # shape: (N, 7)
         
         # --- Vectorized計算(改善2: scan完全排除)---
         # 磁化率計算
