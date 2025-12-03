@@ -62,15 +62,57 @@ from scipy.optimize import curve_fit
 from functools import lru_cache
 from typing import Any, cast
 
-# 物理定数をクラスで管理(スコープ汚染を防ぐ)
+# 物理定数をクラスで管理(THzスケーリング版)
 class PhysicalConstants:
-    """物理定数の定義(SI単位系)"""
-    kB: float = 1.380649e-23      # Boltzmann constant [J/K]
-    muB: float = 9.274010e-24     # Bohr magneton [J/T]
-    hbar: float = 1.054571e-34    # Reduced Planck constant [J·s]
-    c: float = 299792458          # Speed of light [m/s]
-    mu0: float = 4.0 * np.pi * 1e-7  # Vacuum permeability [H/m]
-    s: float = 3.5                # Spin quantum number for Gd3+
+    """
+    物理定数の定義 (THzスケーリング済み)
+    
+    【スケーリングの原理】
+    計算の数値安定性を保つため、内部計算では SI単位(J, s) ではなく
+    「1 THz (= 1e12 Hz) の光子のエネルギー」を基準(=1.0)とする単位系を使用します。
+    
+    基本単位:
+      - 周波数: 1.0 = 1 THz
+      - 時間:   1.0 = 1 ps (1e-12 s)
+      - エネルギー: 1.0 = h * 1 THz
+    
+    【効果】
+    - 従来: kB=1.38e-23, hbar=1.05e-34 → 勾配計算でunderflow/overflow
+    - 修正後: kB≈0.021, hbar≈0.159 → 安定した数値計算
+    """
+    # --- 基準となるスケール ---
+    SCALE_FREQ = 1.0e12  # 1 THz [Hz]
+    
+    # --- SI単位系での真値 ---
+    _h_SI = 6.62607015e-34    # Planck constant [J·s]
+    _hbar_SI = _h_SI / (2 * np.pi)
+    _kB_SI = 1.380649e-23     # Boltzmann constant [J/K]
+    _muB_SI = 9.274010e-24    # Bohr magneton [J/T]
+    
+    # --- 基準エネルギー: E_base = h * 1THz ---
+    _E_base = _h_SI * SCALE_FREQ  # [J]
+
+    # ボルツマン定数 [THz/K]
+    # 温度T[K]を掛けたとき、kB*T が「THz単位のエネルギー」になる
+    kB: float = _kB_SI / _E_base   # ≈ 0.02083 [THz/K]
+    
+    # ボーア磁子 [THz/T]
+    # 磁場B[T]を掛けたとき、muB*B が「THz単位のエネルギー」になる
+    muB: float = _muB_SI / _E_base # ≈ 0.01399 [THz/T]
+    
+    # ディラック定数 [無次元]
+    # E = hbar * omega で、omegaが[rad/ps]相当になるよう調整
+    # THz単位系では hbar = 1/(2π) が最もシンプル
+    hbar: float = 1.0 / (2 * np.pi)  # ≈ 0.159
+    
+    # 光速 [m/s] (波長計算用、SI単位のまま)
+    c: float = 299792458
+    
+    # 真空の透磁率 [H/m] (SI単位のまま)
+    mu0: float = 4.0 * np.pi * 1e-7
+    
+    # スピン量子数
+    s: float = 3.5
 
 # 後方互換性のため(既存コード対応)
 kB = PhysicalConstants.kB
@@ -293,8 +335,10 @@ def load_and_prepare_data(config):
     print(f"✅ データ結合完了: {len(flat_freq)} 点, {len(sorted_conditions)} 条件のデータセット")
 
     return {
-        'freq': flat_freq,
-        'omega': flat_freq * 1e12 * 2 * np.pi,
+        'freq': flat_freq,  # THz単位
+        # 【重要修正】THzスケーリング: omega = freq * 2π (1e12を掛けない)
+        # 物理定数側で 1.0 = 1THz と定義したため、角周波数も同じスケール
+        'omega': flat_freq * 2 * np.pi,  # [THz] → [rad/ps]相当
         'trans': flat_trans,
         'weights': flat_weights,
         'temp': flat_temp,

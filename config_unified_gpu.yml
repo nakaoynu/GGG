@@ -1,5 +1,6 @@
 # ================================================================
 # 磁場・温度一括ベイズ推定プログラム用 設定ファイル (config_unified_gpu.yml)
+# Update: 2025-12-03 (THz Scaling & Correct B4/B6 values)
 # unified_weighted_bayesian_fitting_gpu.py 専用
 # ================================================================
 
@@ -9,23 +10,23 @@ file_paths:
   input_files:
     # 1. 温度変化データ (磁場固定)
     - file_path: "./BayesianInput_Raw_Transmittance_Temperature.xlsx"
-      sheet: "Normalized Data" # シート名指定を追加（オプション）
+      sheet: "Normalized Data"
       type: "temperature"
       fixed_param: 9.0  # 固定磁場 (Tesla)
       description: "温度変化データ (B=9.0T固定)"
 
     # 2. 磁場変化データ (温度固定)
     - file_path: "./BayesianInput_Raw_Transmittance_Field.xlsx"
-      sheet: "Normalized Data" # シート名指定を追加（オプション）
+      sheet: "Normalized Data"
       type: "field"
       fixed_param: 4.0  # 固定温度 (Kelvin)
       description: "磁場変化データ (T=4K固定)"
 
-  # デフォルトのシート名（input_files内で指定がない場合に使用）
+  # デフォルトのシート名(input_files内で指定がない場合に使用)
   sheet_name: "Normalized Data"
   
   # 結果を出力する親ディレクトリ名
-  results_parent_dir: "fullsize_analysis_results_unified_gpu"
+  results_parent_dir: "analysis_results_scaled_gpu"
 
 # --- 実行環境設定 ---
 execution:
@@ -34,8 +35,6 @@ execution:
 
 # --- 物理パラメータ・初期値 ---
 physical_parameters:
-  # ※ 固定磁場・固定温度の設定は input_files 内の fixed_param に移行しました
-  
   # 膜厚 (meter) - 固定値として使用
   d_fixed: 157.8e-6
   # スピン量子数
@@ -43,14 +42,21 @@ physical_parameters:
   # スピン密度 (m^-3)
   N_spin: 1.9386e+28 # 24 / 1.238 * 1e27
 
-  # --- パラメータの初期値 ---
+  # --- パラメータの初期値 (文献値に基づく) ---
   initial_values:
     eps_bg: 14.20
-    g_factor: 1.990    # 初期値（ベイズ推定で更新される）
-    B4: 0.000300       # 結晶場パラメータB4の初期値
-    B6: 0.000030       # 結晶場パラメータB6の初期値
-    gamma: 0.11e12     # 減衰定数γの初期値
-    a_scale: 0.70      # スケーリング係数の初期値
+    g_factor: 2.00     # Gd3+の典型的値
+    
+    # 【重要】文献値 [K] を設定
+    # B4 = 0.00202 K (R.M. Macfarlane et al.)
+    B4: 0.00202
+    
+    # 【重要】文献値 [K] (負の値!)
+    # B6 = -1.20e-5 K (R.M. Macfarlane et al.)
+    B6: -0.0000120
+    
+    gamma: 0.05        # THz単位 (50GHz程度と仮定)
+    a_scale: 1.0
 
 # --- 解析条件設定 ---
 analysis_settings:
@@ -74,49 +80,49 @@ analysis_settings:
 
 # --- ベイズ推定事前分布設定 ---
 bayesian_priors:
-  # 磁気パラメータの事前分布設定（初回実行時）
+  # 磁気パラメータの事前分布設定（THzスケーリング対応）
   magnetic_parameters:
     # a_scale パラメータ (HalfNormal分布)
     a_scale:
       distribution: "HalfNormal"
-      sigma: 1.0
+      sigma: 0.3
     
     # g因子 (Normal分布)
     g_factor:
       distribution: "Normal"
       mu: 2.0
-      sigma: 0.1
+      sigma: 0.05
     
-    # 結晶場パラメータ B4 (Normal分布)
+    # 結晶場パラメータ B4 (Normal分布) [文献値: 0.00202 K]
     B4:
       distribution: "Normal"
-      mu: 0.0005
-      sigma: 0.0001
+      mu: 0.00202
+      sigma: 0.0005
     
-    # 結晶場パラメータ B6 (Normal分布)
+    # 結晶場パラメータ B6 (Normal分布) [文献値: -1.20e-5 K, 負値!]
     B6:
       distribution: "Normal"
-      mu: 0.00005
-      sigma: 0.00001
+      mu: -0.000012
+      sigma: 0.000005
   
-  # gamma（減衰定数）関連の事前分布設定
+  # gamma（減衰定数）関連の事前分布設定 (THzスケーリング)
   gamma_parameters:
-    # log(gamma)のベース値
+    # log(gamma)のベース値 (THz単位: exp(-3) ≈ 0.05 THz = 50 GHz)
     log_gamma_mu_base:
       distribution: "Normal"
-      mu: 25.0
+      mu: -3.0
       sigma: 1.0
     
     # log(gamma)の分散
     log_gamma_sigma_base:
       distribution: "HalfNormal"
-      sigma: 0.3
+      sigma: 0.5
     
     # 各遷移のoffset
     log_gamma_offset_base:
       distribution: "Normal"
       mu: 0.0
-      sigma: 0.3
+      sigma: 0.2
       shape: 7
     
     # 温度依存性係数
@@ -131,20 +137,22 @@ bayesian_priors:
       distribution: "HalfNormal"
       sigma: 0.05
 
-# --- MCMCサンプリング設定 ---
+# --- MCMCサンプリング設定 (安定化設定) ---
 mcmc:
-  # サンプリング数（チェーンごと）
+  # サンプリング数(チェーンごと)
   draws: 2000
-  # チューニング（warmup）期間
+  # チューニング(warmup)期間
   tune: 1000
   # 並列チェーン数
   chains: 4
-  # 受理率の目標値
-  target_accept: 0.85
+  # 受理率の目標値 (divergence対策のため高めに設定)
+  target_accept: 0.95  # 0.85 → 0.95
+  # Tree depthの最大値 (複雑なモデルに対応)
+  max_treedepth: 12    # デフォルト10 → 12
   # パラメータ更新の反復回数
   max_iterations: 2
-  # 初期化戦略
-  init: "adapt_diag"
+  # 初期化戦略 (jitter追加で安定化)
+  init: "jitter+adapt_diag"  # "adapt_diag" → "jitter+adapt_diag"
   # 再現性確保のための乱数シード
   random_seed: 42
   # GPU並列計算用のサンプラーを指定 (numpyro)
