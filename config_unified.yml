@@ -9,13 +9,13 @@ file_paths:
   # 各ファイルから温度列('K'で終わる)と磁場列('T'で終わる)を自動検出
   data_files:
     # 温度変化データファイル
-    - file: "bayesian_inputs\\BayesianInput_Raw_Transmittance_Temperature.xlsx"
+    - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Temperature.xlsx"
       sheet: "Normalized Data"
       type: "temperature"
       description: "温度変化データ (B=9.0T固定)"
     
     # 磁場変化データファイル
-    - file: "bayesian_inputs\\BayesianInput_Raw_Transmittance_Field.xlsx"
+    - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Field.xlsx"
       sheet: "Normalized Data"
       type: "field"
       description: "磁場変化データ (T=4K固定)"
@@ -71,7 +71,7 @@ analysis_settings:
     
     # 重み値設定  
     lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
-    between_peaks_weight: 0.6       # LP-UP間の重み
+    between_peaks_weight: 0.4       # LP-UP間の重み
     high_freq_peak_weight: 1.0      # 高周波ピークの重み
     background_weight: 0.01         # その他の領域の重み（バックグラウンド）
 
