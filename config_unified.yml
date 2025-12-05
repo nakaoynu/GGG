@@ -26,15 +26,13 @@ file_paths:
 # --- 実行環境設定（CPU並列化） ---
 execution:
   # 1チェーンあたりのCPUスレッド数（行列演算の並列化）
-  # 設定の目安: threads_per_chain = 総vCPU数 ÷ chains
   # 
-  # 例: c7i.8xlarge (32 vCPU) の場合
-  #   - chains=4, threads_per_chain=8  → 32 vCPU全使用
-  #   - chains=8, threads_per_chain=4  → 32 vCPU全使用
-  #   - chains=16, threads_per_chain=2 → 32 vCPU全使用
-  #
-  # 未設定(null)の場合はシステムデフォルトを使用
-  threads_per_chain: 8
+  # 【注意】カスタムOp使用時はチェーン並列が主な並列化手段
+  # 8x8行列ではMKL並列化の効果が小さいため、1に設定
+  # 
+  # c7i.8xlarge (32 vCPU) の推奨設定:
+  #   - chains=32, threads_per_chain=1 → 32 vCPUフル活用
+  threads_per_chain: 1
 
 # --- 物理パラメータ・初期値 ---
 physical_parameters:
@@ -187,24 +185,23 @@ bayesian_priors:
       sigma: 0.05
 
 # --- MCMCサンプリング設定 ---
-# 【修正】収束改善と多峰性対策のため設定を強化
+# 【32 vCPU最大活用設定】c7i.8xlarge向け
 mcmc:
   # サンプリング数（チェーンごと）
-  draws: 4000    # 【修正】2000 → 4000: 収束改善のため増加
+  draws: 4000    # 収束改善のため増加
   # チューニング（warmup）期間
-  tune: 2000     # 【修正】1000 → 2000: 多峰性対策のため増加
-  # 並列チェーン数
-  chains: 4
-  # 並列実行コア数（'auto'でCPUコア数を自動検出、整数で明示指定も可能）
-  # chains数以上に設定しても効果なし
-  cores: 4
+  tune: 2000     # 多峰性対策のため増加
+  # 並列チェーン数（c7i.8xlarge: 32 vCPUをフル活用）
+  chains: 32
+  # 並列実行コア数（chains数と同じに設定）
+  cores: 32
   # 受理率の目標値（高いほど慎重にサンプリング）
-  target_accept: 0.95  # 【修正】0.90 → 0.95: 発散防止のため向上
+  target_accept: 0.95  # 発散防止のため高めに設定
   # パラメータ更新の反復回数
   # 各反復でeps_bgを更新してベイズ推定を再実行
   max_iterations: 2
   # 初期化戦略
-  init: "adapt_diag"    # 【修正】jitter+adapt_diag → adapt_diag: より安定した初期化
+  init: "adapt_diag"
   # 再現性確保のための乱数シード
   random_seed: 42
   # GPU並列計算用のサンプラーを指定（カスタムOpと非互換のためコメントアウト）
