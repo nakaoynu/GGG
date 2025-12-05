@@ -30,47 +30,58 @@ import os
 import pathlib
 import yaml
 
-# ライブラリインポート前に設定ファイルを一時的に読み込んでGPU設定を確認する
-def pre_load_gpu_config():
+# ライブラリインポート前に設定ファイルを読み込み、CPU並列設定を適用する
+def pre_load_execution_config():
+    """
+    インポート前にCPU並列実行環境を設定する
+    - OpenMP/MKLスレッド数の設定（行列演算の並列化）
+    """
     try:
         config_path = pathlib.Path(__file__).parent / "config_unified.yml"
         with open(config_path, 'r', encoding='utf-8') as f:
             temp_config = yaml.safe_load(f)
-        if temp_config.get('execution', {}).get('use_gpu', False):
-            print("🚀 GPU (CUDA) 設定を適用します...")
-            os.environ['PYTENSOR_FLAGS'] = 'device=cuda,floatX=float64'
+        
+        exec_config = temp_config.get('execution', {})
+        
+        # CPU設定
+        os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64'
+        
+        # 並列スレッド数の設定（行列演算の高速化）
+        # chains × threads_per_chain ≈ 総vCPU数 となるように設定
+        threads_per_chain = exec_config.get('threads_per_chain', None)
+        if threads_per_chain is not None:
+            threads_str = str(threads_per_chain)
+            os.environ['OMP_NUM_THREADS'] = threads_str
+            os.environ['MKL_NUM_THREADS'] = threads_str
+            os.environ['OPENBLAS_NUM_THREADS'] = threads_str
+            os.environ['NUMEXPR_NUM_THREADS'] = threads_str
+            print(f"⚡ 並列スレッド数を設定: {threads_str} threads/chain")
+            
+            # 総CPU使用量の推定を表示
+            mcmc_config = temp_config.get('mcmc', {})
+            chains = mcmc_config.get('chains', 4)
+            total_threads = chains * threads_per_chain
+            print(f"   → {chains} chains × {threads_per_chain} threads = {total_threads} vCPUs 使用予定")
         else:
-            print("💻 CPU 設定を使用します...")
-            os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64'
+            print("ℹ️  threads_per_chain未設定: デフォルトのスレッド数を使用")
+            
     except Exception as e:
-        print(f"⚠️ GPU設定読み込み失敗: {e} -> CPUを使用します")
+        print(f"⚠️ 実行環境設定読み込み失敗: {e} -> デフォルト設定を使用します")
 
-pre_load_gpu_config()
+pre_load_execution_config()
 
 import datetime
 import warnings
-print("  [✓] 標準ライブラリ")
-
 import numpy as np
-print("  [✓] numpy")
 import pandas as pd
-print("  [✓] pandas")
 import matplotlib.pyplot as plt
-print("  [✓] matplotlib")
 import arviz as az
-print("  [✓] arviz")
-
-print("  [⏳] pymc (これが最も時間がかかります)...")
 import pymc as pm
-print("  [✓] pymc")
 import pytensor.tensor as pt
 from pytensor.graph.op import Op
-print("  [✓] pytensor")
 from typing import List, Dict, Any, Tuple, Optional, Union
 from scipy.signal import find_peaks, peak_widths
 from scipy.optimize import curve_fit
-print("  [✓] scipy")
-
 _import_time = time.time() - _import_start
 print(f"\n✅ 全ライブラリの読み込み完了! (所要時間: {_import_time:.1f}秒)\n")
 
@@ -91,6 +102,13 @@ muB = 9.274010e-24
 hbar = 1.054571e-34
 c = 299792458
 mu0 = 4.0 * np.pi * 1e-7
+s = 3.5  # スピン量子数 
+
+# --- THz単位系変換定数 ---
+# 数値計算の安定性向上のため、周波数・緩和率をTHz単位で扱う
+# 1 THz = 10^12 Hz = 2π × 10^12 rad/s
+THZ_TO_RAD_S = 2.0 * np.pi * 1e12  # THz → rad/s 変換係数
+RAD_S_TO_THZ = 1.0 / THZ_TO_RAD_S  # rad/s → THz 変換係数
 
 # --- 設定ファイル読み込み ---
 def load_config(config_path: Optional[Union[str, pathlib.Path]] = None) -> Dict[str, Any]:
@@ -111,7 +129,7 @@ def load_config(config_path: Optional[Union[str, pathlib.Path]] = None) -> Dict[
             ],
             'results_parent_dir': "analysis_results_unified"
         },
-        'execution': {'use_gpu': False},
+        'execution': {},
         'physical_parameters': {
             'B_fixed': 9.0,
             'd_fixed': 157.8e-6,
@@ -226,7 +244,7 @@ def create_results_directory(config: Dict[str, Any]) -> pathlib.Path:
 
 # --- 物理モデル関数群 (weighted_bayesian_fitting_completed.pyから移植) ---
 
-def get_hamiltonian(B_ext_z: float, g_factor: float, B4: float, B6: float, s: float = 3.5) -> np.ndarray:
+def get_hamiltonian(B_ext_z: float, g_factor: float, B4: float, B6: float) -> np.ndarray:
     """ハミルトニアンを計算する"""
     n_states = int(2 * s + 1)
     m_values = np.arange(s, -s - 1, -1)
@@ -267,9 +285,28 @@ def normalize_gamma_array(gamma_input, target_length: int = 7) -> np.ndarray:
     else:
         return np.full(target_length, gamma_input.item())
 
-def calculate_susceptibility(omega_array: np.ndarray, H: np.ndarray, T: float, gamma_array: np.ndarray) -> np.ndarray:
-    """磁気感受率を計算する"""
-    gamma_array = normalize_gamma_array(gamma_array)
+def calculate_susceptibility(freq_thz_array: np.ndarray, H: np.ndarray, T: float, 
+                             gamma_thz_array: np.ndarray) -> np.ndarray:
+    """
+    磁気感受率を計算する
+    
+    Parameters
+    ----------
+    freq_thz_array : np.ndarray
+        周波数配列 [THz]
+    H : np.ndarray
+        ハミルトニアン行列
+    T : float
+        温度 [K]
+    gamma_thz_array : np.ndarray
+        緩和率配列 [THz]
+    
+    Returns
+    -------
+    np.ndarray
+        磁気感受率（複素数）
+    """
+    gamma_thz_array = normalize_gamma_array(gamma_thz_array)
     
     eigenvalues, _ = np.linalg.eigh(H)
     eigenvalues -= np.min(eigenvalues)
@@ -282,43 +319,69 @@ def calculate_susceptibility(omega_array: np.ndarray, H: np.ndarray, T: float, g
     
     valid_mask = np.isfinite(delta_E) & (np.abs(delta_E) > 1e-30)
     if not np.any(valid_mask):
-        return np.zeros_like(omega_array, dtype=complex)
+        return np.zeros_like(freq_thz_array, dtype=complex)
     
-    omega_0 = delta_E / hbar
+    # 遷移周波数をTHz単位で計算
+    omega_0_rad = delta_E / hbar  # rad/s
+    freq_0_thz = omega_0_rad * RAD_S_TO_THZ  # THzに変換
+    
     s_val = 3.5
     m_vals = np.arange(s_val, -s_val, -1)
     transition_strength = (s_val + m_vals) * (s_val - m_vals + 1)
     
-    if len(gamma_array) != len(delta_E):
-        if len(gamma_array) > len(delta_E):
-            gamma_array = gamma_array[:len(delta_E)]
+    if len(gamma_thz_array) != len(delta_E):
+        if len(gamma_thz_array) > len(delta_E):
+            gamma_thz_array = gamma_thz_array[:len(delta_E)]
         else:
-            gamma_array = np.pad(gamma_array, (0, len(delta_E) - len(gamma_array)), 'edge')
+            gamma_thz_array = np.pad(gamma_thz_array, (0, len(delta_E) - len(gamma_thz_array)), 'edge')
     
     numerator = delta_pop * transition_strength
-    finite_mask = np.isfinite(numerator) & np.isfinite(omega_0) & np.isfinite(gamma_array)
+    finite_mask = np.isfinite(numerator) & np.isfinite(freq_0_thz) & np.isfinite(gamma_thz_array)
     numerator = numerator[finite_mask]
-    omega_0_filtered = omega_0[finite_mask]
-    gamma_filtered = gamma_array[finite_mask]
+    freq_0_filtered = freq_0_thz[finite_mask]  # THz
+    gamma_filtered = gamma_thz_array[finite_mask]  # THz
     
     if len(numerator) == 0:
-        return np.zeros_like(omega_array, dtype=complex)
+        return np.zeros_like(freq_thz_array, dtype=complex)
     
-    chi_array = np.zeros_like(omega_array, dtype=complex)
-    for i, omega in enumerate(omega_array):
-        if not np.isfinite(omega):
+    # THz単位で計算（数値的に安定）
+    chi_array = np.zeros_like(freq_thz_array, dtype=complex)
+    for i, freq_thz in enumerate(freq_thz_array):
+        if not np.isfinite(freq_thz):
             continue
-        denominator = omega_0_filtered - omega - 1j * gamma_filtered
-        denominator[np.abs(denominator) < 1e-20] = 1e-20 + 1j * 1e-20
+        # 分母: (f0 - f) - i*γ すべてTHz単位
+        denominator = freq_0_filtered - freq_thz - 1j * gamma_filtered
+        denominator[np.abs(denominator) < 1e-10] = 1e-10 + 1j * 1e-10
         chi_array[i] = np.sum(numerator / denominator)
     
     return -chi_array
 
-def calculate_normalized_transmission(omega_array: np.ndarray, mu_r_array: np.ndarray, 
+def calculate_normalized_transmission(freq_thz_array: np.ndarray, mu_r_array: np.ndarray, 
                                      d: float, eps_bg: float) -> np.ndarray:
-    """正規化透過率を計算する"""
+    """
+    正規化透過率を計算する
+    
+    Parameters
+    ----------
+    freq_thz_array : np.ndarray
+        周波数配列 [THz]
+    mu_r_array : np.ndarray
+        比透磁率配列
+    d : float
+        試料厚さ [m]
+    eps_bg : float
+        背景誘電率
+    
+    Returns
+    -------
+    np.ndarray
+        正規化透過率
+    """
     eps_bg = max(eps_bg, 0.1)
     d = max(d, 1e-6)
+    
+    # THz → rad/s に変換して波長を計算
+    omega_array = freq_thz_array * THZ_TO_RAD_S
     
     mu_r_safe = np.where(np.isfinite(mu_r_array), mu_r_array, 1.0)
     eps_mu_product = eps_bg * mu_r_safe
@@ -495,9 +558,8 @@ def load_unified_data(config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]
                     all_temp_datasets.append({
                         'temperature': temp_value,
                         'b_field': B_fixed,
-                        'frequency': freq,
+                        'frequency': freq,  # THz単位
                         'transmittance_full': trans,
-                        'omega': freq * 1e12 * 2 * np.pi,
                         'pattern': 'temp_variable',
                         'source_file': pathlib.Path(file_path).name
                     })
@@ -521,9 +583,8 @@ def load_unified_data(config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]
                     all_field_datasets.append({
                         'temperature': T_fixed,
                         'b_field': B_value,
-                        'frequency': freq,
+                        'frequency': freq,  # THz単位
                         'transmittance_full': trans,
-                        'omega': freq * 1e12 * 2 * np.pi,
                         'pattern': 'field_variable',
                         'source_file': pathlib.Path(file_path).name
                     })
@@ -560,9 +621,8 @@ def split_data_by_frequency(datasets: List[Dict[str, Any]],
             high_freq_datasets.append({
                 'temperature': data['temperature'],
                 'b_field': data['b_field'],
-                'frequency': freq[high_mask],
+                'frequency': freq[high_mask],  # THz単位
                 'transmittance': trans_norm_high,
-                'omega': data['omega'][high_mask],
                 'pattern': data['pattern']
             })
     
@@ -623,18 +683,18 @@ def fit_eps_bg_unified(dataset: Dict[str, Any],
         print(f"  🔰 初期値を使用")
     
     def model_func(freq_thz, eps_bg_fit):
-        """eps_bgのみを変数とするモデル"""
+        """eps_bgのみを変数とするモデル（THz単位系）"""
         try:
-            omega = freq_thz * 1e12 * 2 * np.pi
             H = get_hamiltonian(B, g_factor, B4, B6)
-            gamma_array = np.full(7, 0.11e12)  # 高周波領域では固定gamma
-            chi_raw = calculate_susceptibility(omega, H, T, gamma_array)
+            # gammaもTHz単位で指定（0.11 THz ≈ 0.11e12 rad/s ÷ 2π×10^12）
+            gamma_thz_array = np.full(7, 0.018)  # 約0.018 THz = 0.11e12 rad/s
+            chi_raw = calculate_susceptibility(freq_thz, H, T, gamma_thz_array)
             
             G0 = a_scale * mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
             chi = G0 * chi_raw
             mu_r = 1 + chi  # H_form（必要に応じて変更）
             
-            return calculate_normalized_transmission(omega, mu_r, d_fixed, eps_bg_fit)
+            return calculate_normalized_transmission(freq_thz, mu_r, d_fixed, eps_bg_fit)
         except:
             return np.ones_like(freq_thz) * 0.5
     
@@ -662,9 +722,17 @@ def fit_eps_bg_unified(dataset: Dict[str, Any],
     print(f"  ❌ 全試行失敗、デフォルト値使用")
     return {'eps_bg': 14.20, 'd': d_fixed, 'temperature': T, 'b_field': B}
 
-# --- PyMC Op クラス（統合版） ---
+# --- PyMC Op クラス（統合版・THz単位系） ---
 class UnifiedMagneticModelOp(Op):
-    """磁場・温度両対応の統合PyMC Opクラス"""
+    """
+    磁場・温度両対応の統合PyMC Opクラス
+    
+    入力パラメータの単位:
+    - a_scale: 無次元
+    - gamma_concat: THz単位
+    - g_factor: 無次元
+    - B4, B6: K単位
+    """
     def __init__(self, datasets: List[Dict[str, Any]], 
                  bt_specific_params: Dict[Tuple[float, float], Dict[str, float]], 
                  model_type: str):
@@ -680,13 +748,14 @@ class UnifiedMagneticModelOp(Op):
         self.otypes = [pt.dvector]
     
     def perform(self, node, inputs, output_storage):
-        a_scale, gamma_concat, g_factor, B4, B6 = inputs
+        a_scale, gamma_thz_concat, g_factor, B4, B6 = inputs
         full_predicted_y = []
         gamma_start_idx = 0
         
         for data in self.datasets:
             B = data['b_field']
             T = data['temperature']
+            freq_thz = data['frequency']  # THz単位
             
             # (B, T)に対応するeps_bgとdを取得
             bt_key = (B, T)
@@ -697,14 +766,14 @@ class UnifiedMagneticModelOp(Op):
                 d_fixed = 157.8e-6
                 eps_bg_fixed = 14.20
             
-            # 温度依存gammaの取得
+            # 温度依存gammaの取得（THz単位）
             gamma_end_idx = gamma_start_idx + 7
-            gamma_for_bt = gamma_concat[gamma_start_idx:gamma_end_idx]
+            gamma_thz_for_bt = gamma_thz_concat[gamma_start_idx:gamma_end_idx]
             gamma_start_idx = gamma_end_idx
             
-            # 物理モデル計算
+            # 物理モデル計算（全てTHz単位）
             H = get_hamiltonian(B, g_factor, B4, B6)
-            chi_raw = calculate_susceptibility(data['omega'], H, T, gamma_for_bt)
+            chi_raw = calculate_susceptibility(freq_thz, H, T, gamma_thz_for_bt)
             
             G0 = a_scale * mu0 * 1.9386e+28 * (g_factor * muB)**2 / (2 * hbar)
             chi = G0 * chi_raw
@@ -714,7 +783,7 @@ class UnifiedMagneticModelOp(Op):
             else:  # H_form
                 mu_r = 1 + chi
             
-            predicted_trans = calculate_normalized_transmission(data['omega'], mu_r, d_fixed, eps_bg_fixed)
+            predicted_trans = calculate_normalized_transmission(freq_thz, mu_r, d_fixed, eps_bg_fixed)
             predicted_trans = np.where(np.isfinite(predicted_trans), predicted_trans, 0.5)
             predicted_trans = np.clip(predicted_trans, 0, 1)
             
@@ -723,44 +792,120 @@ class UnifiedMagneticModelOp(Op):
         output_storage[0][0] = np.array(full_predicted_y)
 
 # --- ベイズ推定関数 ---
+def create_single_prior(name: str, config: Dict[str, Any], mu: Optional[float] = None) -> Any:
+    """
+    設定に基づいて単一の事前分布を作成する汎用関数
+    
+    Parameters
+    ----------
+    name : str
+        パラメータ名
+    config : Dict[str, Any]
+        分布設定（distribution, mu, sigma, lower, upper等）
+    mu : Optional[float]
+        中心値（configにmuがない場合に使用）
+    
+    Returns
+    -------
+    PyMC分布オブジェクト
+    """
+    dist_type = config.get('distribution', 'Normal')
+    sigma = config['sigma']
+    
+    # muの決定: config > 引数 > デフォルト0.0
+    mu_value = config.get('mu', mu if mu is not None else 0.0)
+    
+    if dist_type == 'Normal':
+        return pm.Normal(name, mu=mu_value, sigma=sigma)
+    
+    elif dist_type == 'HalfNormal':
+        return pm.HalfNormal(name, sigma=sigma)
+    
+    elif dist_type == 'TruncatedNormal':
+        # 正値制約付き正規分布（物理パラメータに推奨）
+        lower = config.get('lower', 0.0)
+        upper = config.get('upper', None)
+        return pm.TruncatedNormal(name, mu=mu_value, sigma=sigma, lower=lower, upper=upper)
+    
+    elif dist_type == 'LogNormal':
+        # 対数正規分布（正値のみ、スケールパラメータに適する）
+        # mu, sigmaは対数スケールでの値として解釈
+        return pm.LogNormal(name, mu=np.log(mu_value) if mu_value > 0 else 0.0, sigma=sigma)
+    
+    else:
+        raise ValueError(f"未対応の分布タイプ: {dist_type}")
+
+
 def create_prior_distributions(prior_config: Dict[str, Any], 
                               prior_magnetic_params: Optional[Dict[str, float]] = None,
                               initial_values: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
-    """事前分布を作成"""
+    """
+    事前分布を作成（設定ファイルからの分布タイプ読み取りに対応）
+    
+    対応分布:
+    - Normal: 通常の正規分布
+    - HalfNormal: 半正規分布（正値のみ、μ=0）
+    - TruncatedNormal: 切断正規分布（指定範囲に制約）
+    - LogNormal: 対数正規分布（正値のみ）
+    """
     priors = {}
     
     if prior_magnetic_params is None:
+        # 初回実行時: initial_valuesを中心値として使用
         if initial_values is None:
             raise ValueError("initial_values パラメータは prior_magnetic_params が None の場合に必須です")
         mag_config = prior_config['magnetic_parameters']
-        priors['a_scale'] = pm.HalfNormal('a_scale', sigma=mag_config['a_scale']['sigma'])
-        priors['g_factor'] = pm.Normal('g_factor', mu=initial_values['g_factor'], 
-                                      sigma=mag_config['g_factor']['sigma'])
-        priors['B4'] = pm.Normal('B4', mu=initial_values['B4'], sigma=mag_config['B4']['sigma'])
-        priors['B6'] = pm.Normal('B6', mu=initial_values['B6'], sigma=mag_config['B6']['sigma'])
+        
+        # a_scale: 正値のみ（TruncatedNormalまたはHalfNormal推奨）
+        priors['a_scale'] = create_single_prior('a_scale', mag_config['a_scale'], 
+                                                mu=initial_values.get('a_scale', 1.0))
+        
+        # g_factor: 正値のみ（TruncatedNormal推奨）
+        priors['g_factor'] = create_single_prior('g_factor', mag_config['g_factor'],
+                                                 mu=initial_values['g_factor'])
+        
+        # B4, B6: 正負両方あり得る（Normal）
+        priors['B4'] = create_single_prior('B4', mag_config['B4'], mu=initial_values['B4'])
+        priors['B6'] = create_single_prior('B6', mag_config['B6'], mu=initial_values['B6'])
     else:
+        # 2回目以降: 前回の推定結果を中心値として使用
         prior_config_info = prior_config['with_prior_info']
-        priors['a_scale'] = pm.Normal('a_scale', mu=prior_magnetic_params['a_scale'], 
-                                     sigma=prior_config_info['a_scale']['sigma'])
-        priors['g_factor'] = pm.Normal('g_factor', mu=prior_magnetic_params['g_factor'], 
-                                      sigma=prior_config_info['g_factor']['sigma'])
-        priors['B4'] = pm.Normal('B4', mu=prior_magnetic_params['B4'], 
-                                sigma=prior_config_info['B4']['sigma'])
-        priors['B6'] = pm.Normal('B6', mu=prior_magnetic_params['B6'], 
-                                sigma=prior_config_info['B6']['sigma'])
+        
+        priors['a_scale'] = create_single_prior('a_scale', prior_config_info['a_scale'],
+                                                mu=prior_magnetic_params['a_scale'])
+        priors['g_factor'] = create_single_prior('g_factor', prior_config_info['g_factor'],
+                                                 mu=prior_magnetic_params['g_factor'])
+        priors['B4'] = create_single_prior('B4', prior_config_info['B4'],
+                                          mu=prior_magnetic_params['B4'])
+        priors['B6'] = create_single_prior('B6', prior_config_info['B6'],
+                                          mu=prior_magnetic_params['B6'])
     
     return priors
 
-def create_gamma_priors(gamma_config: Dict[str, Any], gamma_init: float) -> Dict[str, Any]:
-    """gamma事前分布を作成"""
-    # gamma_initを確実にfloatに変換
-    gamma_init_float = float(gamma_init)
-    if gamma_init_float <= 0:
-        raise ValueError(f"gamma_init must be positive, got {gamma_init_float}")
+def create_gamma_priors(gamma_config: Dict[str, Any], gamma_thz_init: float) -> Dict[str, Any]:
+    """
+    gamma事前分布を作成（THz単位）
+    
+    Parameters
+    ----------
+    gamma_config : Dict[str, Any]
+        gamma関連の事前分布設定
+    gamma_thz_init : float
+        gamma初期値 [THz]
+    
+    Returns
+    -------
+    Dict[str, Any]
+        gamma事前分布のPyMCオブジェクト
+    """
+    gamma_thz_init_float = float(gamma_thz_init)
+    if gamma_thz_init_float <= 0:
+        raise ValueError(f"gamma_thz_init must be positive, got {gamma_thz_init_float}")
     
     gamma_priors = {}
+    # log(gamma)のベース値（THz単位での対数）
     gamma_priors['log_gamma_mu_base'] = pm.Normal('log_gamma_mu_base', 
-                                                  mu=np.log(gamma_init_float), 
+                                                  mu=np.log(gamma_thz_init_float), 
                                                   sigma=gamma_config['log_gamma_mu_base']['sigma'])
     gamma_priors['log_gamma_sigma_base'] = pm.HalfNormal('log_gamma_sigma_base', 
                                                          sigma=gamma_config['log_gamma_sigma_base']['sigma'])
@@ -800,39 +945,47 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
         B4 = magnetic_priors['B4']
         B6 = magnetic_priors['B6']
         
-        # gamma事前分布
-        gamma_init = initial_values['gamma']
-        print(f"  gamma初期値: {gamma_init} (型: {type(gamma_init).__name__})")
+        # gamma事前分布（THz単位）
+        # 設定ファイルのgamma初期値をTHz単位に変換
+        gamma_init_raw = initial_values['gamma']
+        # gamma_init_rawがrad/s単位の場合（>1e9）、THz単位に変換
+        if gamma_init_raw > 1e9:
+            gamma_thz_init = gamma_init_raw * RAD_S_TO_THZ
+            print(f"  gamma初期値: {gamma_init_raw:.2e} rad/s → {gamma_thz_init:.4f} THz に変換")
+        else:
+            gamma_thz_init = gamma_init_raw
+            print(f"  gamma初期値: {gamma_thz_init:.4f} THz (既にTHz単位)")
         
         gamma_priors = create_gamma_priors(prior_config['gamma_parameters'], 
-                                          gamma_init)
+                                          gamma_thz_init)
         log_gamma_mu_base = gamma_priors['log_gamma_mu_base']
         log_gamma_sigma_base = gamma_priors['log_gamma_sigma_base']
         log_gamma_offset_base = gamma_priors['log_gamma_offset_base']
         temp_gamma_slope = gamma_priors['temp_gamma_slope']
         
-        # 全(B, T)ペアでのgamma計算
+        # 全(B, T)ペアでのgamma計算（THz単位）
         bt_pairs = sorted(list(set([(d['b_field'], d['temperature']) for d in datasets])))
-        gamma_all_bt = []
+        gamma_thz_all_bt = []
         base_temp = 4.0
         
         for B, T in bt_pairs:
             temp_diff = T - base_temp
             temp_correction = temp_gamma_slope * temp_diff
             log_gamma_mu_temp = log_gamma_mu_base + temp_correction
-            gamma_bt = pt.exp(log_gamma_mu_temp + log_gamma_offset_base * log_gamma_sigma_base)
-            gamma_all_bt.append(gamma_bt)
+            # gamma_bt はTHz単位
+            gamma_thz_bt = pt.exp(log_gamma_mu_temp + log_gamma_offset_base * log_gamma_sigma_base)
+            gamma_thz_all_bt.append(gamma_thz_bt)
         
         # データセットの順序に合わせてgammaを選択
-        gamma_final = []
+        gamma_thz_final = []
         for dataset in datasets:
             bt_key = (dataset['b_field'], dataset['temperature'])
             bt_idx = bt_pairs.index(bt_key)
-            gamma_final.append(gamma_all_bt[bt_idx])
+            gamma_thz_final.append(gamma_thz_all_bt[bt_idx])
         
-        gamma_concat = pt.concatenate(gamma_final, axis=0)
+        gamma_thz_concat = pt.concatenate(gamma_thz_final, axis=0)
         
-        # 重み付きデータセット作成
+        # 重み付きデータセット作成（frequency使用、omegaは不要）
         datasets_weighted = []
         weights_start_idx = 0
         for i, data in enumerate(datasets):
@@ -846,9 +999,8 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
                 weighted_dataset = {
                     'temperature': data['temperature'],
                     'b_field': data['b_field'],
-                    'frequency': data['frequency'][dataset_valid_indices],
+                    'frequency': data['frequency'][dataset_valid_indices],  # THz単位
                     'transmittance_full': data['transmittance_full'][dataset_valid_indices],
-                    'omega': data['omega'][dataset_valid_indices],
                     'weights': dataset_weights[dataset_valid_indices],
                     'pattern': data['pattern']
                 }
@@ -860,9 +1012,9 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
             print("⚠️ 有効な重み付きデータポイントがありません。")
             return None
         
-        # PyMC Op
+        # PyMC Op（gamma_thz_concatはTHz単位）
         op_weighted = UnifiedMagneticModelOp(datasets_weighted, bt_specific_params, model_type)
-        mu = op_weighted(a_scale, gamma_concat, g_factor, B4, B6)
+        mu = op_weighted(a_scale, gamma_thz_concat, g_factor, B4, B6)
         
         weights_tensor = pt.as_tensor_variable(np.concatenate([d['weights'] for d in datasets_weighted]))
         
@@ -876,10 +1028,17 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
         # サンプリング
         mcmc_config = config['mcmc']
         try:
+            # 並列コア数の決定（設定ファイル > チェーン数 > 自動検出）
+            n_cores = mcmc_config.get('cores', mcmc_config['chains'])
+            if n_cores == 'auto':
+                import multiprocessing
+                n_cores = min(multiprocessing.cpu_count(), mcmc_config['chains'])
+            
             sample_kwargs = {
                 'draws': mcmc_config['draws'],
                 'tune': mcmc_config['tune'],
                 'chains': mcmc_config['chains'],
+                'cores': n_cores,  # 並列実行コア数
                 'target_accept': mcmc_config['target_accept'],
                 'random_seed': mcmc_config.get('random_seed', None),
                 'init': mcmc_config.get('init', 'auto'),
@@ -887,6 +1046,8 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
                 'progressbar': True,
                 'idata_kwargs': {'log_likelihood': True}
             }
+            
+            print(f"⚡ 並列サンプリング: {mcmc_config['chains']}チェーン × {n_cores}コア")
 
             if 'nuts_sampler' in mcmc_config:
                 sample_kwargs['nuts_sampler'] = mcmc_config['nuts_sampler']

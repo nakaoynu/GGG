@@ -23,10 +23,18 @@ file_paths:
   # 結果を出力する親ディレクトリ名
   results_parent_dir: "fullsize_analysis_results_unified"
 
-# --- 実行環境設定 ---
+# --- 実行環境設定（CPU並列化） ---
 execution:
-  # GPU (NVIDIA CUDA) を使用するかどうか (true/false)
-  use_gpu: false
+  # 1チェーンあたりのCPUスレッド数（行列演算の並列化）
+  # 設定の目安: threads_per_chain = 総vCPU数 ÷ chains
+  # 
+  # 例: c7i.8xlarge (32 vCPU) の場合
+  #   - chains=4, threads_per_chain=8  → 32 vCPU全使用
+  #   - chains=8, threads_per_chain=4  → 32 vCPU全使用
+  #   - chains=16, threads_per_chain=2 → 32 vCPU全使用
+  #
+  # 未設定(null)の場合はシステムデフォルトを使用
+  threads_per_chain: 8
 
 # --- 物理パラメータ・初期値 ---
 physical_parameters:
@@ -42,13 +50,14 @@ physical_parameters:
   N_spin: 1.9386e+28 # 24 / 1.238 * 1e27
 
   # --- パラメータの初期値 ---
+  # 【THz単位系】数値計算安定性のため、周波数・緩和率はTHz単位で統一
   initial_values:
     eps_bg: 14.20
     g_factor: 1.990    # 初期値（ベイズ推定で更新される）
-    B4: 0.000300       # 結晶場パラメータB4の初期値
-    B6: 0.000030       # 結晶場パラメータB6の初期値
-    gamma: 0.11e12     # 減衰定数γの初期値
-    a_scale: 0.70     # スケーリング係数の初期値
+    B4: 0.00202       # 結晶場パラメータB4の初期値 [K]
+    B6: -0.0000120    # 結晶場パラメータB6の初期値 [K]
+    gamma: 0.018      # 減衰定数γの初期値 [THz] (≈ 0.11e12 rad/s ÷ 2π×10^12)
+    a_scale: 0.70     # スケーリング係数の初期値（無次元）
 
 # --- 解析条件設定 ---
 analysis_settings:
@@ -78,53 +87,69 @@ analysis_settings:
 # --- ベイズ推定事前分布設定 ---
 bayesian_priors:
   # 磁気パラメータの事前分布設定（初回実行時）
+  # 【修正】指導教員レビューに基づき、収束安定化のため事前分布を調整
+  # 【追加修正】正値パラメータにはTruncatedNormalを使用して物理的制約を反映
   magnetic_parameters:
-    # a_scale パラメータ (HalfNormal分布)
-    # スケーリング係数、正の値のみ
+    # a_scale パラメータ (TruncatedNormal分布)
+    # 【修正】正値制約を明示的に設定（μ=1.0周辺、lower=0で正値保証）
+    # 補正係数は通常1.0周辺に収まるべき
     a_scale:
-      distribution: "HalfNormal"
-      sigma: 1.0
+      distribution: "TruncatedNormal"
+      mu: 1.0
+      sigma: 0.2
+      lower: 0.0    # 正値のみ許容
+      upper: 2.0    # 物理的に妥当な上限
     
-    # g因子 (Normal分布)
+    # g因子 (TruncatedNormal分布)
+    # 【修正】正値制約を明示的に設定（Gd3+のg因子は~2.0）
     # 中心値は initial_values.g_factor から自動取得
     g_factor:
-      distribution: "Normal" 
-      sigma: 0.1
+      distribution: "TruncatedNormal"
+      sigma: 0.05
+      lower: 1.8    # g因子の物理的下限
+      upper: 2.2    # g因子の物理的上限
     
     # 結晶場パラメータ B4 (Normal分布)
+    # B4は正負両方の値を取り得る
     # 中心値は initial_values.B4 から自動取得
     B4:
       distribution: "Normal"
-      sigma: 0.001
+      sigma: 0.0003
     
     # 結晶場パラメータ B6 (Normal分布)
+    # B6は正負両方の値を取り得る
     # 中心値は initial_values.B6 から自動取得
     B6:
       distribution: "Normal"
-      sigma: 0.0001
+      sigma: 0.00003
   
   # 事前情報がある場合の設定（2回目以降の反復で使用）
+  # 【修正】初回設定との整合性を確保
   with_prior_info:
-    # a_scale (Normal分布)
+    # a_scale (TruncatedNormal分布)
     # 前回の推定結果を中心値として使用
     a_scale:
-      distribution: "Normal"
-      sigma: 0.5  # より寛容な設定
+      distribution: "TruncatedNormal"
+      sigma: 0.15
+      lower: 0.0
+      upper: 2.0
     
-    # g因子 
+    # g因子 (TruncatedNormal分布)
     g_factor:
-      distribution: "Normal"
-      sigma: 0.1
+      distribution: "TruncatedNormal"
+      sigma: 0.05
+      lower: 1.8
+      upper: 2.2
     
-    # B4
+    # B4 (Normal分布)
     B4:
       distribution: "Normal"
-      sigma: 0.001
+      sigma: 0.0003
     
-    # B6
+    # B6 (Normal分布)
     B6:
       distribution: "Normal"
-      sigma: 0.0001
+      sigma: 0.00003
   
   # gamma（減衰定数）関連の事前分布設定
   gamma_parameters:
@@ -137,21 +162,23 @@ bayesian_priors:
     # log(gamma)の分散（各遷移間の相関を制御）
     log_gamma_sigma_base:
       distribution: "HalfNormal"
-      sigma: 0.3  # 小さい値でoffset間の相関を強める
+      sigma: 0.5  # 【修正】0.3 → 0.5: 遷移間の線幅差を許容
     
     # 各遷移のoffset（7つの遷移に対応）
     log_gamma_offset_base:
       distribution: "Normal"
       mu: 0.0
-      sigma: 0.3  # 小さい値で変動を抑える
+      sigma: 0.5  # 【修正】0.3 → 0.5: 遷移間の変動を許容
       shape: 7    # 7つの遷移（s=7/2の場合）
     
     # 温度依存性係数（線形項）
     # gamma(T) = gamma_base * exp(temp_gamma_slope * (T - T_base))
+    # 【重要修正】高温データ再現のため制約を大幅に緩和
+    # 物理的に温度上昇でγは増大する傾向があるため、muを正の値に設定
     temp_gamma_slope:
       distribution: "Normal"
-      mu: 0.0
-      sigma: 0.01
+      mu: 0.005   # 【修正】0.0 → 0.005: 温度上昇で線幅増大を期待
+      sigma: 0.1  # 【重要修正】0.01 → 0.1: 10倍に緩和（必須）
   
   # ノイズパラメータ
   noise_parameters:
@@ -160,20 +187,24 @@ bayesian_priors:
       sigma: 0.05
 
 # --- MCMCサンプリング設定 ---
+# 【修正】収束改善と多峰性対策のため設定を強化
 mcmc:
   # サンプリング数（チェーンごと）
-  draws: 3000
+  draws: 4000    # 【修正】2000 → 4000: 収束改善のため増加
   # チューニング（warmup）期間
-  tune: 1000
+  tune: 2000     # 【修正】1000 → 2000: 多峰性対策のため増加
   # 並列チェーン数
   chains: 4
+  # 並列実行コア数（'auto'でCPUコア数を自動検出、整数で明示指定も可能）
+  # chains数以上に設定しても効果なし
+  cores: 4
   # 受理率の目標値（高いほど慎重にサンプリング）
-  target_accept: 0.90
+  target_accept: 0.95  # 【修正】0.90 → 0.95: 発散防止のため向上
   # パラメータ更新の反復回数
   # 各反復でeps_bgを更新してベイズ推定を再実行
   max_iterations: 2
   # 初期化戦略
-  init: "adapt_diag"       # 適応的対角初期化
+  init: "adapt_diag"    # 【修正】jitter+adapt_diag → adapt_diag: より安定した初期化
   # 再現性確保のための乱数シード
   random_seed: 42
   # GPU並列計算用のサンプラーを指定（カスタムOpと非互換のためコメントアウト）
