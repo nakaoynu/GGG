@@ -17,6 +17,52 @@
 # - 温度変化データ: 各温度列 (例: '4K', '10K', '20K', ...)
 # - 磁場変化データ: 各磁場列 (例: '1T', '2T', '3T', ...)
 
+# ============================================================================
+# 【重要】CPU並列化の環境変数設定
+# NumPy/SciPyのインポート前に設定する必要がある
+# ============================================================================
+import os
+import pathlib
+
+def _setup_cpu_threads():
+    """NumPyインポート前にCPU並列スレッド数を設定"""
+    try:
+        # YAMLだけ先にインポート（軽量）
+        import yaml
+        config_path = pathlib.Path(__file__).parent / "config_unified.yml"
+        with open(config_path, 'r', encoding='utf-8') as f:
+            temp_config = yaml.safe_load(f)
+        
+        exec_config = temp_config.get('execution', {})
+        threads_per_chain = exec_config.get('threads_per_chain', None)
+        
+        if threads_per_chain is not None:
+            threads_str = str(threads_per_chain)
+            # 全ての並列ライブラリに設定
+            os.environ['OMP_NUM_THREADS'] = threads_str
+            os.environ['MKL_NUM_THREADS'] = threads_str
+            os.environ['OPENBLAS_NUM_THREADS'] = threads_str
+            os.environ['NUMEXPR_NUM_THREADS'] = threads_str
+            os.environ['VECLIB_MAXIMUM_THREADS'] = threads_str
+            
+            mcmc_config = temp_config.get('mcmc', {})
+            chains = mcmc_config.get('chains', 4)
+            total_threads = chains * threads_per_chain
+            print(f"⚡ CPU並列設定: {threads_str} threads/chain × {chains} chains = {total_threads} vCPUs")
+        else:
+            print("ℹ️  threads_per_chain未設定: システムデフォルトを使用")
+            
+    except Exception as e:
+        print(f"⚠️ CPU並列設定失敗: {e}")
+
+# NumPyより先に環境変数を設定
+_setup_cpu_threads()
+
+# PyTensor設定（CPU専用）
+os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64'
+
+# ============================================================================
+
 print("="*70)
 print("磁場・温度一括ベイズ推定プログラム")
 print("="*70)
@@ -26,52 +72,9 @@ print("   Ctrl+Cで中断しないでください\n")
 import time
 _import_start = time.time()
 
-import os
-import pathlib
-import yaml
-
-# ライブラリインポート前に設定ファイルを読み込み、CPU並列設定を適用する
-def pre_load_execution_config():
-    """
-    インポート前にCPU並列実行環境を設定する
-    - OpenMP/MKLスレッド数の設定（行列演算の並列化）
-    """
-    try:
-        config_path = pathlib.Path(__file__).parent / "config_unified.yml"
-        with open(config_path, 'r', encoding='utf-8') as f:
-            temp_config = yaml.safe_load(f)
-        
-        exec_config = temp_config.get('execution', {})
-        
-        # CPU設定
-        os.environ['PYTENSOR_FLAGS'] = 'device=cpu,floatX=float64'
-        
-        # 並列スレッド数の設定（行列演算の高速化）
-        # chains × threads_per_chain ≈ 総vCPU数 となるように設定
-        threads_per_chain = exec_config.get('threads_per_chain', None)
-        if threads_per_chain is not None:
-            threads_str = str(threads_per_chain)
-            os.environ['OMP_NUM_THREADS'] = threads_str
-            os.environ['MKL_NUM_THREADS'] = threads_str
-            os.environ['OPENBLAS_NUM_THREADS'] = threads_str
-            os.environ['NUMEXPR_NUM_THREADS'] = threads_str
-            print(f"⚡ 並列スレッド数を設定: {threads_str} threads/chain")
-            
-            # 総CPU使用量の推定を表示
-            mcmc_config = temp_config.get('mcmc', {})
-            chains = mcmc_config.get('chains', 4)
-            total_threads = chains * threads_per_chain
-            print(f"   → {chains} chains × {threads_per_chain} threads = {total_threads} vCPUs 使用予定")
-        else:
-            print("ℹ️  threads_per_chain未設定: デフォルトのスレッド数を使用")
-            
-    except Exception as e:
-        print(f"⚠️ 実行環境設定読み込み失敗: {e} -> デフォルト設定を使用します")
-
-pre_load_execution_config()
-
 import datetime
 import warnings
+import yaml
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
