@@ -347,17 +347,24 @@ def calculate_susceptibility(freq_thz_array: np.ndarray, H: np.ndarray, T: float
     if len(numerator) == 0:
         return np.zeros_like(freq_thz_array, dtype=complex)
     
-    # THz単位で計算（数値的に安定）
-    chi_array = np.zeros_like(freq_thz_array, dtype=complex)
-    for i, freq_thz in enumerate(freq_thz_array):
-        if not np.isfinite(freq_thz):
-            continue
-        # 分母: (f0 - f) - i*γ すべてTHz単位
-        denominator = freq_0_filtered - freq_thz - 1j * gamma_filtered
-        denominator[np.abs(denominator) < 1e-10] = 1e-10 + 1j * 1e-10
-        chi_array[i] = np.sum(numerator / denominator)
+    # ベクトル化計算（高速化）
+    # 形状: freq_thz_array (N_freq,), freq_0_filtered (N_trans,)
+    # ブロードキャストで (N_freq, N_trans) の2次元配列として計算
     
-    return -chi_array
+    # freq_thz_array[:, None] -> (N_freq, 1)
+    # freq_0_filtered[None, :] -> (1, N_trans)
+    # 結果: (N_freq, N_trans)
+    freq_diff = freq_0_filtered[None, :] - freq_thz_array[:, None]  # (N_freq, N_trans)
+    denominator = freq_diff - 1j * gamma_filtered[None, :]  # (N_freq, N_trans)
+    
+    # ゼロ除算回避
+    small_mask = np.abs(denominator) < 1e-10
+    denominator[small_mask] = 1e-10 + 1j * 1e-10
+    
+    # 各周波数に対して全遷移の寄与を合計
+    chi_array = -np.sum(numerator[None, :] / denominator, axis=1)  # (N_freq,)
+    
+    return chi_array
 
 def calculate_normalized_transmission(freq_thz_array: np.ndarray, mu_r_array: np.ndarray, 
                                      d: float, eps_bg: float) -> np.ndarray:

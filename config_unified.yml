@@ -27,12 +27,11 @@ file_paths:
 execution:
   # 1チェーンあたりのCPUスレッド数（行列演算の並列化）
   # 
-  # 【注意】カスタムOp使用時はチェーン並列が主な並列化手段
-  # 8x8行列ではMKL並列化の効果が小さいため、1に設定
+  # ベクトル化計算により、NumPyブロードキャストがMKL/OpenBLASを活用
   # 
   # c7i.8xlarge (32 vCPU) の推奨設定:
-  #   - chains=32, threads_per_chain=1 → 32 vCPUフル活用
-  threads_per_chain: 1
+  #   - chains=8, threads_per_chain=4 → 32 vCPU使用
+  threads_per_chain: 4
 
 # --- 物理パラメータ・初期値 ---
 physical_parameters:
@@ -185,16 +184,15 @@ bayesian_priors:
       sigma: 0.05
 
 # --- MCMCサンプリング設定 ---
-# 【32 vCPU最大活用設定】c7i.8xlarge向け
 mcmc:
   # サンプリング数（チェーンごと）
   draws: 4000    # 収束改善のため増加
   # チューニング（warmup）期間
   tune: 2000     # 多峰性対策のため増加
-  # 並列チェーン数（c7i.8xlarge: 32 vCPUをフル活用）
-  chains: 32
+  # 並列チェーン数
+  chains: 8
   # 並列実行コア数（chains数と同じに設定）
-  cores: 32
+  cores: 8
   # 受理率の目標値（高いほど慎重にサンプリング）
   target_accept: 0.95  # 発散防止のため高めに設定
   # パラメータ更新の反復回数
