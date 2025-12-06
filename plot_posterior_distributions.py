@@ -237,13 +237,13 @@ if __name__ == "__main__":
         print("\n使用方法:")
         print("  python plot_posterior_distributions.py <trace_path> [--output-dir <dir>] [--var-names <vars>]")
         print("\n例:")
-        print("  python plot_posterior_distributions.py analysis_results_unified/run_20251121_120000/trace_H_form.nc")
+        print("  python plot_posterior_distributions.py fullsize_analysis_results_unified/run_20251121_120000/trace_H_form.nc")
         print("\n最新の結果を自動検出して実行しますか？ (y/n): ", end="")
         
         response = input().strip().lower()
         if response == 'y':
             # 最新の結果ディレクトリを検索
-            results_parent = pathlib.Path("analysis_results_unified")
+            results_parent = pathlib.Path("fullsize_analysis_results_unified")
             if results_parent.exists():
                 run_dirs = sorted([d for d in results_parent.glob("run_*") if d.is_dir()], 
                                 reverse=True)

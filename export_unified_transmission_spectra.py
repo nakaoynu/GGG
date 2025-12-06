@@ -34,6 +34,7 @@ MUB = uwbf.muB
 HBAR = uwbf.hbar
 KB = uwbf.kB
 BASE_TEMPERATURE = 4.0  # 温度依存gamma計算の基準温度
+S = uwbf.s # スピン量子数（統合版モジュールから取得）
 
 try:
     import japanize_matplotlib
@@ -240,7 +241,7 @@ def calculate_transmission_single(
     gamma_array: np.ndarray,
     model_type: str,
     n_spin: float,
-    s: float = 3.5,
+    S: float = S,
 ) -> np.ndarray:
     """単一のパラメータセットで透過スペクトルを計算
     
@@ -279,7 +280,7 @@ def calculate_transmission_single(
         正規化された透過スペクトル
     """
     # ハミルトニアンを計算
-    hamiltonian = uwbf.get_hamiltonian(b_field, g_factor, param_b4, param_b6, s=s)
+    hamiltonian = uwbf.get_hamiltonian(b_field, g_factor, param_b4, param_b6)
     
     # 磁気感受率を計算
     chi_raw = uwbf.calculate_susceptibility(omega_eval, hamiltonian, temperature, gamma_array)
