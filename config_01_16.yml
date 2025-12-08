@@ -1,0 +1,232 @@
+# ================================================================
+# 磁場・温度一括ベイズ推定プログラム用 設定ファイル (config_unified.yml)
+# unified_weighted_bayesian_fitting.py 専用
+# ================================================================
+
+# --- ファイルパス設定 ---
+file_paths:
+  # 複数データファイル対応
+  # 各ファイルから温度列('K'で終わる)と磁場列('T'で終わる)を自動検出
+  data_files:
+    # 温度変化データファイル
+    - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Temperature.xlsx"
+      sheet: "Normalized Data"
+      type: "temperature"
+      description: "温度変化データ (B=9.0T固定)"
+    
+    # 磁場変化データファイル
+    - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Field.xlsx"
+      sheet: "Normalized Data"
+      type: "field"
+      description: "磁場変化データ (T=4K固定)"
+  
+  # 結果を出力する親ディレクトリ名
+  results_parent_dir: "fullsize_analysis_results_unified"
+
+# --- 実行環境設定（CPU並列化） ---
+execution:
+  # 1チェーンあたりのCPUスレッド数（行列演算の並列化）
+  # 設定の目安: threads_per_chain = 総vCPU数 ÷ chains
+  # 
+  # 例: c7i.8xlarge (32 vCPU) の場合
+  #   - chains=4, threads_per_chain=8  → 32 vCPU全使用
+  #   - chains=8, threads_per_chain=4  → 32 vCPU全使用
+  #   - chains=16, threads_per_chain=2 → 32 vCPU全使用
+  #
+  # 未設定(null)の場合はシステムデフォルトを使用
+  threads_per_chain: 8
+
+# --- 物理パラメータ・初期値 ---
+physical_parameters:
+  # 温度変化データの固定磁場 (Tesla)
+  B_fixed: 9.0
+  # 磁場変化データの固定温度 (Kelvin) - load_unified_data関数内で使用
+  T_fixed: 4.0
+  # 膜厚 (meter) - 固定値として使用
+  d_fixed: 157.8e-6
+  # スピン量子数
+  s: 3.5
+  # スピン密度 (m^-3)
+  N_spin: 1.9386e+28 # 24 / 1.238 * 1e27
+
+  # --- パラメータの初期値 ---
+  # 【THz単位系】数値計算安定性のため、周波数・緩和率はTHz単位で統一
+  initial_values:
+    eps_bg: 14.20
+    g_factor: 1.990    # 初期値（ベイズ推定で更新される）
+    B4: 0.00202       # 結晶場パラメータB4の初期値 [K]
+    B6: -0.0000120    # 結晶場パラメータB6の初期値 [K]
+    gamma: 0.018      # 減衰定数γの初期値 [THz] (≈ 0.11e12 rad/s ÷ 2π×10^12)
+    a_scale: 0.70     # スケーリング係数の初期値（無次元）
+
+# --- 解析条件設定 ---
+analysis_settings:
+  # 温度・磁場データの自動検出設定
+  # - 温度列: 列名が'K'で終わる列を自動検出(例: '4K', '10K', '30K', '100K', '300K', ...)
+  # - 磁場列: 列名が'T'で終わる列を自動検出(例: '1T', '2T', '3T', ...)
+  # ※温度列と磁場列の両方が自動検出され、温度列を除外した上で磁場列が判定される
+  # ※Excelファイルにこれらの列がない場合は処理されない
+  
+  # 周波数領域のカットオフ値 (THz)
+  low_freq_cutoff: 0.361505   # 低周波カットオフ（現在未使用）
+  high_freq_cutoff: 0.45       # 高周波カットオフ（eps_bgフィッティング用）
+  
+  # --- 重み付け設定 ---
+  weight_settings:
+    # ピーク検出の閾値設定
+    peak_height_threshold: 0.01      # ピーク検出の最小高さ（正規化透過率）
+    peak_prominence_threshold: 0.04  # ピーク検出のプロミネンス閾値
+    peak_distance: 10                # ピーク間の最小距離（データ点数）
+    
+    # 重み値設定  
+    lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
+    between_peaks_weight: 0.4       # LP-UP間の重み
+    high_freq_peak_weight: 1.0      # 高周波ピークの重み
+    background_weight: 0.01         # その他の領域の重み（バックグラウンド）
+
+# --- ベイズ推定事前分布設定 ---
+bayesian_priors:
+  # 磁気パラメータの事前分布設定（初回実行時）
+  # 【修正】指導教員レビューに基づき、収束安定化のため事前分布を調整
+  # 【追加修正】正値パラメータにはTruncatedNormalを使用して物理的制約を反映
+  magnetic_parameters:
+    # a_scale パラメータ (TruncatedNormal分布)
+    # 【修正】正値制約を明示的に設定（μ=1.0周辺、lower=0で正値保証）
+    # 補正係数は通常1.0周辺に収まるべき
+    a_scale:
+      distribution: "TruncatedNormal"
+      mu: 1.0
+      sigma: 0.2
+      lower: 0.0    # 正値のみ許容
+      upper: 2.0    # 物理的に妥当な上限
+    
+    # g因子 (TruncatedNormal分布)
+    # 【修正】正値制約を明示的に設定（Gd3+のg因子は~2.0）
+    # 中心値は initial_values.g_factor から自動取得
+    g_factor:
+      distribution: "TruncatedNormal"
+      sigma: 0.05
+      lower: 1.8    # g因子の物理的下限
+      upper: 2.2    # g因子の物理的上限
+    
+    # 結晶場パラメータ B4 (Normal分布)
+    # B4は正負両方の値を取り得る
+    # 中心値は initial_values.B4 から自動取得
+    B4:
+      distribution: "Normal"
+      sigma: 0.0003
+    
+    # 結晶場パラメータ B6 (Normal分布)
+    # B6は正負両方の値を取り得る
+    # 中心値は initial_values.B6 から自動取得
+    B6:
+      distribution: "Normal"
+      sigma: 0.00003
+  
+  # 事前情報がある場合の設定（2回目以降の反復で使用）
+  # 【修正】初回設定との整合性を確保
+  with_prior_info:
+    # a_scale (TruncatedNormal分布)
+    # 前回の推定結果を中心値として使用
+    a_scale:
+      distribution: "TruncatedNormal"
+      sigma: 0.15
+      lower: 0.0
+      upper: 2.0
+    
+    # g因子 (TruncatedNormal分布)
+    g_factor:
+      distribution: "TruncatedNormal"
+      sigma: 0.05
+      lower: 1.8
+      upper: 2.2
+    
+    # B4 (Normal分布)
+    B4:
+      distribution: "Normal"
+      sigma: 0.0003
+    
+    # B6 (Normal分布)
+    B6:
+      distribution: "Normal"
+      sigma: 0.00003
+  
+  # gamma（減衰定数）関連の事前分布設定
+  gamma_parameters:
+    # log(gamma)のベース値
+    log_gamma_mu_base:
+      distribution: "Normal"
+      sigma: 1.0
+      # 中心値は log(initial_values.gamma) から自動取得
+    
+    # log(gamma)の分散（各遷移間の相関を制御）
+    log_gamma_sigma_base:
+      distribution: "HalfNormal"
+      sigma: 0.5  # 【修正】0.3 → 0.5: 遷移間の線幅差を許容
+    
+    # 各遷移のoffset（7つの遷移に対応）
+    log_gamma_offset_base:
+      distribution: "Normal"
+      mu: 0.0
+      sigma: 0.5  # 【修正】0.3 → 0.5: 遷移間の変動を許容
+      shape: 7    # 7つの遷移（s=7/2の場合）
+    
+    # 温度依存性係数（線形項）
+    # gamma(T) = gamma_base * exp(temp_gamma_slope * (T - T_base))
+    # 【重要修正】高温データ再現のため制約を大幅に緩和
+    # 物理的に温度上昇でγは増大する傾向があるため、muを正の値に設定
+    temp_gamma_slope:
+      distribution: "Normal"
+      mu: 0.005   # 【修正】0.0 → 0.005: 温度上昇で線幅増大を期待
+      sigma: 0.1  # 【重要修正】0.01 → 0.1: 10倍に緩和（必須）
+  
+  # ノイズパラメータ
+  noise_parameters:
+    sigma:
+      distribution: "HalfNormal"
+      sigma: 0.05
+
+# --- MCMCサンプリング設定 ---
+# 【修正】収束改善と多峰性対策のため設定を強化
+mcmc:
+  # サンプリング数（チェーンごと）
+  draws: 4000    # 【修正】2000 → 4000: 収束改善のため増加
+  # チューニング（warmup）期間
+  tune: 2000     # 【修正】1000 → 2000: 多峰性対策のため増加
+  # 並列チェーン数
+  chains: 16
+  # 並列実行コア数（'auto'でCPUコア数を自動検出、整数で明示指定も可能）
+  # chains数以上に設定しても効果なし
+  cores: 16
+  # 受理率の目標値（高いほど慎重にサンプリング）
+  target_accept: 0.90
+  # パラメータ更新の反復回数
+  # 各反復でeps_bgを更新してベイズ推定を再実行
+  max_iterations: 2
+  # 初期化戦略
+  init: "adapt_diag"    # 【修正】jitter+adapt_diag → adapt_diag: より安定した初期化
+  # 再現性確保のための乱数シード
+  random_seed: 42
+  # GPU並列計算用のサンプラーを指定（カスタムOpと非互換のためコメントアウト）
+  # nuts_sampler: "numpyro"  
+
+# --- データセット設定（統合処理用） ---
+dataset_config:
+  # 温度変化データの説明
+  temp_variable:
+    enabled: true
+    description: "温度を変数、磁場を固定したデータセット"
+    # B_fixedと自動検出された温度列('K'で終わる列)から自動生成
+  
+  # 磁場変化データの説明
+  field_variable:
+    enabled: true
+    description: "磁場を変数、温度を固定したデータセット"
+    # T_fixedと自動検出された磁場列('T'で終わる列)から生成
+
+# --- 出力設定 ---
+output:
+  # 保存するファイル
+  save_trace: true              # traceファイル（.nc）を保存
+  save_parameters: true         # パラメータCSVを保存
+  save_bt_params: true          # (B,T)別光学パラメータCSVを保存
