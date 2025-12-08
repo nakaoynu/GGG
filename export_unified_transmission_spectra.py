@@ -229,7 +229,7 @@ def compute_map_estimates(posterior_subset: xr.Dataset) -> Dict[str, Any]:
 
 
 def calculate_transmission_single(
-    omega_eval: np.ndarray,
+    freq_thz_array: np.ndarray,
     b_field: float,
     temperature: float,
     eps_bg: float,
@@ -243,12 +243,12 @@ def calculate_transmission_single(
     n_spin: float,
     S: float = S,
 ) -> np.ndarray:
-    """単一のパラメータセットで透過スペクトルを計算
+    """単一のパラメータセットで透過スペクトルを計算（THz単位系対応版）
     
     Parameters
     ----------
-    omega_eval : np.ndarray
-        角周波数配列 (rad/s)
+    freq_thz_array : np.ndarray
+        周波数配列 (THz)
     b_field : float
         磁場 (T)
     temperature : float
@@ -266,7 +266,7 @@ def calculate_transmission_single(
     param_b6 : float
         結晶場パラメータ B6 (K)
     gamma_array : np.ndarray
-        遷移の減衰パラメータ配列
+        遷移の減衰パラメータ配列 (THz)
     model_type : str
         モデルタイプ ('H_form' または 'B_form')
     n_spin : float
@@ -282,8 +282,8 @@ def calculate_transmission_single(
     # ハミルトニアンを計算
     hamiltonian = uwbf.get_hamiltonian(b_field, g_factor, param_b4, param_b6)
     
-    # 磁気感受率を計算
-    chi_raw = uwbf.calculate_susceptibility(omega_eval, hamiltonian, temperature, gamma_array)
+    # 磁気感受率を計算（THz単位系）
+    chi_raw = uwbf.calculate_susceptibility(freq_thz_array, hamiltonian, temperature, gamma_array)
     g0 = a_scale * MU0 * n_spin * (g_factor * MUB) ** 2 / (2 * HBAR)
     chi = g0 * chi_raw
 
@@ -293,8 +293,8 @@ def calculate_transmission_single(
     else:  # H_form
         mu_r = 1.0 + chi
 
-    # 透過率を計算
-    trans = uwbf.calculate_normalized_transmission(omega_eval, mu_r, thickness, eps_bg)
+    # 透過率を計算（THz単位系）
+    trans = uwbf.calculate_normalized_transmission(freq_thz_array, mu_r, thickness, eps_bg)
     return np.clip(np.real_if_close(trans), 0.0, 1.0)
 
 
@@ -342,7 +342,6 @@ def simulate_predictions(
         freq_eval = np.linspace(freq_exp.min(), freq_exp.max(), freq_points)
     else:
         freq_eval = freq_exp
-    omega_eval = freq_eval * 1e12 * 2 * np.pi
 
     eps_bg = params["eps_bg"]
     thickness = params["d"]
@@ -382,11 +381,11 @@ def simulate_predictions(
             log_gamma_mu_temp[:, None] + log_gamma_offset * log_gamma_sigma[:, None]
         )
 
-    # 全事後サンプルで透過率を計算
+    # 全事後サンプルで透過率を計算（THz単位系）
     print(f"    事後サンプル {n_draws}個で透過率を計算中...", end="", flush=True)
     for idx in range(n_draws):
         predictions[idx] = calculate_transmission_single(
-            omega_eval, b_field, temperature, eps_bg, thickness,
+            freq_eval, b_field, temperature, eps_bg, thickness,
             a_scale[idx], g_factor[idx], param_b4[idx], param_b6[idx],
             gamma_samples[idx], model_type, n_spin, s
         )
@@ -396,7 +395,7 @@ def simulate_predictions(
     mean_pred = predictions.mean(axis=0)
     lower, upper = np.percentile(predictions, [2.5, 97.5], axis=0)
 
-    # MAP（最大事後確率）予測を計算
+    # MAP（最大事後確率）予測を計算（THz単位系）
     map_params = compute_map_estimates(posterior_subset)
     temp_diff_map = temperature - BASE_TEMPERATURE
     log_gamma_mu_temp_map = map_params['log_gamma_mu_base'] + map_params['temp_gamma_slope'] * temp_diff_map
@@ -405,7 +404,7 @@ def simulate_predictions(
     )
     
     map_pred = calculate_transmission_single(
-        omega_eval, b_field, temperature, eps_bg, thickness,
+        freq_eval, b_field, temperature, eps_bg, thickness,
         map_params['a_scale'], map_params['g_factor'], map_params['B4'], map_params['B6'],
         gamma_map, model_type, n_spin, s
     )
