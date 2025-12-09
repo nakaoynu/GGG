@@ -383,6 +383,16 @@ def simulate_predictions(
 
     # 全事後サンプルで透過率を計算（THz単位系）
     print(f"    事後サンプル {n_draws}個で透過率を計算中...", end="", flush=True)
+    
+    # デバッグ: 最初のサンプルのパラメータ値を表示
+    if n_draws > 0:
+        print(f"\n    [デバッグ] パラメータ例 (sample 0):")
+        print(f"      a_scale={a_scale[0]:.4f}, g_factor={g_factor[0]:.4f}")
+        print(f"      B4={param_b4[0]:.6f} K, B6={param_b6[0]:.8f} K")
+        print(f"      gamma (THz): {gamma_samples[0][:3]}... (最初の3つ)")
+        print(f"      eps_bg={eps_bg:.4f}, thickness={thickness*1e6:.2f} um")
+        print(f"    ", end="", flush=True)
+    
     for idx in range(n_draws):
         predictions[idx] = calculate_transmission_single(
             freq_eval, b_field, temperature, eps_bg, thickness,
@@ -390,6 +400,15 @@ def simulate_predictions(
             gamma_samples[idx], model_type, n_spin, s
         )
     print(" 完了")
+    
+    # デバッグ: 予測値の統計を表示
+    pred_mean = predictions.mean()
+    pred_std = predictions.std()
+    pred_all_same = np.allclose(predictions, 0.5, atol=0.01)
+    if pred_all_same:
+        print(f"    [警告] 予測が全て0.5付近: 物理モデル計算に問題がある可能性")
+    else:
+        print(f"    [デバッグ] 予測統計: mean={pred_mean:.4f}, std={pred_std:.4f}, range=[{predictions.min():.4f}, {predictions.max():.4f}]")
 
     # 統計量を計算
     mean_pred = predictions.mean(axis=0)

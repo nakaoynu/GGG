@@ -109,16 +109,18 @@ bayesian_priors:
     # 結晶場パラメータ B4 (Normal分布)
     # B4は正負両方の値を取り得る
     # 中心値は initial_values.B4 から自動取得
+    # 【修正】収束安定化のためsigmaを狭く設定
     B4:
       distribution: "Normal"
-      sigma: 0.0003
+      sigma: 0.0002  # 0.0003 → 0.0002: より厳密な制約
     
     # 結晶場パラメータ B6 (Normal分布)
     # B6は正負両方の値を取り得る
     # 中心値は initial_values.B6 から自動取得
+    # 【修正】収束安定化のためsigmaを狭く設定
     B6:
       distribution: "Normal"
-      sigma: 0.00003
+      sigma: 0.00001  # 0.00003 → 0.00001: より厳密な制約
   
   # 事前情報がある場合の設定（2回目以降の反復で使用）
   # 【修正】初回設定との整合性を確保
@@ -139,14 +141,16 @@ bayesian_priors:
       upper: 2.2
     
     # B4 (Normal分布)
+    # 【修正】収束安定化のためsigmaを狭く設定
     B4:
       distribution: "Normal"
-      sigma: 0.0003
+      sigma: 0.0002  # 0.0003 → 0.0002
     
     # B6 (Normal分布)
+    # 【修正】収束安定化のためsigmaを狭く設定
     B6:
       distribution: "Normal"
-      sigma: 0.00003
+      sigma: 0.00001  # 0.00003 → 0.00001
   
   # gamma（減衰定数）関連の事前分布設定
   gamma_parameters:
@@ -170,12 +174,12 @@ bayesian_priors:
     
     # 温度依存性係数（線形項）
     # gamma(T) = gamma_base * exp(temp_gamma_slope * (T - T_base))
-    # 【重要修正】高温データ再現のため制約を大幅に緩和
-    # 物理的に温度上昇でγは増大する傾向があるため、muを正の値に設定
+    # 【修正】物理的に妥当な範囲に制限
+    # 温度上昇でルは増大する傾向があるが、過度な変化は拑否
     temp_gamma_slope:
       distribution: "Normal"
-      mu: 0.005   # 【修正】0.0 → 0.005: 温度上昇で線幅増大を期待
-      sigma: 0.1  # 【重要修正】0.01 → 0.1: 10倍に緩和（必須）
+      mu: 0.003    # 【修正】0.005 → 0.003: 控えめな温度依存性
+      sigma: 0.03  # 【修正】0.1 → 0.03: 狭めの制約で物理的妥当性を保証
   
   # ノイズパラメータ
   noise_parameters:

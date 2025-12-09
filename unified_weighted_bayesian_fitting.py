@@ -311,32 +311,38 @@ def calculate_susceptibility(freq_thz_array: np.ndarray, H: np.ndarray, T: float
     """
     gamma_thz_array = normalize_gamma_array(gamma_thz_array)
     
-    eigenvalues, _ = np.linalg.eigh(H)
-    eigenvalues -= np.min(eigenvalues)
-    eigenvalues = np.clip(eigenvalues / (kB * T), -700, 700)
+    # ハミルトニアンを対角化（固有値はエネルギー単位: J）
+    eigenvalues_J, _ = np.linalg.eigh(H)
+    E_min = np.min(eigenvalues_J)
+    eigenvalues_shifted_J = eigenvalues_J - E_min  # 基底状態を0に設定（J単位）
     
-    Z = np.sum(np.exp(-eigenvalues))
-    populations = np.exp(-eigenvalues) / Z
-    delta_E = (eigenvalues[1:] - eigenvalues[:-1]) * kB * T
+    # ボルツマン因子計算（無次元化）
+    # E / (kB * T) が700を超えないようクリップ
+    boltzmann_exponent = np.clip(eigenvalues_shifted_J / (kB * T), -700, 700)
+    Z = np.sum(np.exp(-boltzmann_exponent))
+    populations = np.exp(-boltzmann_exponent) / Z
+    
+    # エネルギー差（J単位）- 隣接準位間の遷移
+    delta_E_J = eigenvalues_shifted_J[1:] - eigenvalues_shifted_J[:-1]
     delta_pop = populations[1:] - populations[:-1]
     
-    valid_mask = np.isfinite(delta_E) & (np.abs(delta_E) > 1e-30)
+    valid_mask = np.isfinite(delta_E_J) & (np.abs(delta_E_J) > 1e-30)
     if not np.any(valid_mask):
         return np.zeros_like(freq_thz_array, dtype=complex)
     
     # 遷移周波数をTHz単位で計算
-    omega_0_rad = delta_E / hbar  # rad/s
+    omega_0_rad = delta_E_J / hbar  # rad/s
     freq_0_thz = omega_0_rad * RAD_S_TO_THZ  # THzに変換
     
     s_val = 3.5
     m_vals = np.arange(s_val, -s_val, -1)
     transition_strength = (s_val + m_vals) * (s_val - m_vals + 1)
     
-    if len(gamma_thz_array) != len(delta_E):
-        if len(gamma_thz_array) > len(delta_E):
-            gamma_thz_array = gamma_thz_array[:len(delta_E)]
+    if len(gamma_thz_array) != len(delta_E_J):
+        if len(gamma_thz_array) > len(delta_E_J):
+            gamma_thz_array = gamma_thz_array[:len(delta_E_J)]
         else:
-            gamma_thz_array = np.pad(gamma_thz_array, (0, len(delta_E) - len(gamma_thz_array)), 'edge')
+            gamma_thz_array = np.pad(gamma_thz_array, (0, len(delta_E_J) - len(gamma_thz_array)), 'edge')
     
     numerator = delta_pop * transition_strength
     finite_mask = np.isfinite(numerator) & np.isfinite(freq_0_thz) & np.isfinite(gamma_thz_array)
@@ -422,9 +428,15 @@ def calculate_normalized_transmission(freq_thz_array: np.ndarray, mu_r_array: np
     transmission = np.clip(transmission, 0, 2)
     
     min_trans, max_trans = np.min(transmission), np.max(transmission)
+    
+    # 正規化: min-max正規化、ただしバリエーションが小さすぎる場合は警告
     if max_trans > min_trans and np.isfinite(max_trans) and np.isfinite(min_trans):
-        return (transmission - min_trans) / (max_trans - min_trans)
+        # 正規化実行
+        normalized = (transmission - min_trans) / (max_trans - min_trans)
+        return normalized
     else:
+        # 全て同じ値の場合：デバッグ情報なしで中間値を返す
+        # 注意: この状態は物理モデルに問題がある可能性を示す
         return np.full_like(transmission, 0.5)
 
 # --- 重み付け関数 ---
