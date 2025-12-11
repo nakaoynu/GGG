@@ -8,7 +8,3 @@ __pycache__/
 
 # Environment files
 .env
-
-# Large trace files (>2GB) - exclude from Git/LFS
-fullsize_analysis_results_unified/run_20251205_065121/trace_*.nc
-fullsize_analysis_results_unified/run_20251208_073442/trace_*.nc

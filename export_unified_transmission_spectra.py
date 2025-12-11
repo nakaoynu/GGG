@@ -35,6 +35,7 @@ HBAR = uwbf.hbar
 KB = uwbf.kB
 BASE_TEMPERATURE = 4.0  # 温度依存gamma計算の基準温度
 S = uwbf.s # スピン量子数（統合版モジュールから取得）
+THZ_TO_RAD_S = uwbf.THZ_TO_RAD_S  # THz → rad/s 変換係数
 
 try:
     import japanize_matplotlib
@@ -284,7 +285,10 @@ def calculate_transmission_single(
     
     # 磁気感受率を計算（THz単位系）
     chi_raw = uwbf.calculate_susceptibility(freq_thz_array, hamiltonian, temperature, gamma_array)
-    g0 = a_scale * MU0 * n_spin * (g_factor * MUB) ** 2 / (2 * HBAR)
+    # 【修正】THz単位系での次元合わせ: chi_rawは1/THz次元 = THZ_TO_RAD_S/(rad/s)
+    # 旧版のchi_rawは1/(rad/s)次元なので、chi_raw_new = chi_raw_old * THZ_TO_RAD_S
+    # chi = G0 * chi_raw を一致させるには G0_new = G0_old / THZ_TO_RAD_S
+    g0 = a_scale * MU0 * n_spin * (g_factor * MUB) ** 2 / (2 * HBAR) / THZ_TO_RAD_S
     chi = g0 * chi_raw
 
     # モデルに応じて比透磁率を計算

@@ -186,6 +186,74 @@ bayesian_priors:
     sigma:
       distribution: "HalfNormal"
       sigma: 0.05
+  
+  # B_form専用の事前分布設定（初回実行時）
+  # B_formは μ_r = 1/(1-χ) の形式で数値的不安定性が高い
+  # より強い制約と狭い分布で収束を促進
+  b_form_magnetic_parameters:
+    a_scale:
+      distribution: "TruncatedNormal"
+      mu: 0.5           # B_formは小さめの値を取る傾向
+      sigma: 0.15       # 狭めの分布で探索範囲を制限
+      lower: 0.1
+      upper: 1.5
+    
+    g_factor:
+      distribution: "TruncatedNormal"
+      sigma: 0.03       # より厳密な制約
+      lower: 1.9
+      upper: 2.1
+    
+    B4:
+      distribution: "Normal"
+      sigma: 0.0005     # H_formより広めの探索（初期値からのずれを許容）
+    
+    B6:
+      distribution: "Normal"
+      sigma: 0.00005    # H_formより広めの探索
+  
+  # B_form専用の事前情報がある場合の設定（2回目以降）
+  b_form_with_prior_info:
+    a_scale:
+      distribution: "TruncatedNormal"
+      sigma: 0.1        # 前回結果を強く信頼
+      lower: 0.1
+      upper: 1.5
+    
+    g_factor:
+      distribution: "TruncatedNormal"
+      sigma: 0.02
+      lower: 1.9
+      upper: 2.1
+    
+    B4:
+      distribution: "Normal"
+      sigma: 0.0003
+    
+    B6:
+      distribution: "Normal"
+      sigma: 0.00003
+  
+  # B_form専用のgammaパラメータ
+  b_form_gamma_parameters:
+    log_gamma_mu_base:
+      distribution: "Normal"
+      sigma: 0.8        # 狭めの分布で安定化
+    
+    log_gamma_sigma_base:
+      distribution: "HalfNormal"
+      sigma: 0.4        # 遷移間の変動を抑制
+    
+    log_gamma_offset_base:
+      distribution: "Normal"
+      mu: 0.0
+      sigma: 0.4        # 遷移間オフセットを小さめに
+      shape: 7
+    
+    temp_gamma_slope:
+      distribution: "Normal"
+      mu: 0.002         # 控えめな温度依存性
+      sigma: 0.02       # 厳しい制約
 
 # --- MCMCサンプリング設定 ---
 mcmc:
@@ -199,6 +267,13 @@ mcmc:
   cores: 8
   # 受理率の目標値（高いほど慎重にサンプリング）
   target_accept: 0.95  # 発散防止のため高めに設定
+  
+  # B_form専用の強化設定（収束困難なモデル用）
+  b_form_overrides:
+    draws: 8000         # H_formの2倍（より多くのサンプル）
+    tune: 4000          # 長いチューニング期間
+    target_accept: 0.98 # より慎重なサンプリング
+    max_iterations: 3   # 追加の反復でeps_bg更新
   # パラメータ更新の反復回数
   # 各反復でeps_bgを更新してベイズ推定を再実行
   max_iterations: 2

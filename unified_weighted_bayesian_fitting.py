@@ -712,7 +712,10 @@ def fit_eps_bg_unified(dataset: Dict[str, Any],
             gamma_thz_array = np.full(7, 0.018)  # 約0.018 THz = 0.11e12 rad/s
             chi_raw = calculate_susceptibility(freq_thz, H, T, gamma_thz_array)
             
-            G0 = a_scale * mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar)
+            # 【修正】THz単位系での次元合わせ: chi_rawは1/THz次元 = THZ_TO_RAD_S/(rad/s)
+            # 旧版のchi_rawは1/(rad/s)次元なので、chi_raw_new = chi_raw_old * THZ_TO_RAD_S
+            # chi = G0 * chi_raw を一致させるには G0_new = G0_old / THZ_TO_RAD_S
+            G0 = a_scale * mu0 * N_spin * (g_factor * muB)**2 / (2 * hbar) / THZ_TO_RAD_S
             chi = G0 * chi_raw
             mu_r = 1 + chi  # H_form（必要に応じて変更）
             
@@ -797,7 +800,10 @@ class UnifiedMagneticModelOp(Op):
             H = get_hamiltonian(B, g_factor, B4, B6)
             chi_raw = calculate_susceptibility(freq_thz, H, T, gamma_thz_for_bt)
             
-            G0 = a_scale * mu0 * 1.9386e+28 * (g_factor * muB)**2 / (2 * hbar)
+            # 【修正】THz単位系での次元合わせ: chi_rawは1/THz次元 = THZ_TO_RAD_S/(rad/s)
+            # 旧版のchi_rawは1/(rad/s)次元なので、chi_raw_new = chi_raw_old * THZ_TO_RAD_S
+            # chi = G0 * chi_raw を一致させるには G0_new = G0_old / THZ_TO_RAD_S
+            G0 = a_scale * mu0 * 1.9386e+28 * (g_factor * muB)**2 / (2 * hbar) / THZ_TO_RAD_S
             chi = G0 * chi_raw
             
             if self.model_type == 'B_form':
@@ -860,7 +866,8 @@ def create_single_prior(name: str, config: Dict[str, Any], mu: Optional[float] =
 
 def create_prior_distributions(prior_config: Dict[str, Any], 
                               prior_magnetic_params: Optional[Dict[str, float]] = None,
-                              initial_values: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+                              initial_values: Optional[Dict[str, float]] = None,
+                              model_type: str = 'H_form') -> Dict[str, Any]:
     """
     事前分布を作成（設定ファイルからの分布タイプ読み取りに対応）
     
@@ -876,7 +883,13 @@ def create_prior_distributions(prior_config: Dict[str, Any],
         # 初回実行時: initial_valuesを中心値として使用
         if initial_values is None:
             raise ValueError("initial_values パラメータは prior_magnetic_params が None の場合に必須です")
-        mag_config = prior_config['magnetic_parameters']
+        
+        # B_form専用設定があればそれを使用
+        if model_type == 'B_form' and 'b_form_magnetic_parameters' in prior_config:
+            mag_config = prior_config['b_form_magnetic_parameters']
+            print(f"  🛠️ B_form専用の事前分布パラメータを使用")
+        else:
+            mag_config = prior_config['magnetic_parameters']
         
         # a_scale: 正値のみ（TruncatedNormalまたはHalfNormal推奨）
         priors['a_scale'] = create_single_prior('a_scale', mag_config['a_scale'], 
@@ -891,7 +904,11 @@ def create_prior_distributions(prior_config: Dict[str, Any],
         priors['B6'] = create_single_prior('B6', mag_config['B6'], mu=initial_values['B6'])
     else:
         # 2回目以降: 前回の推定結果を中心値として使用
-        prior_config_info = prior_config['with_prior_info']
+        if model_type == 'B_form' and 'b_form_with_prior_info' in prior_config:
+            prior_config_info = prior_config['b_form_with_prior_info']
+            print(f"  🛠️ B_form専用の事前情報パラメータを使用")
+        else:
+            prior_config_info = prior_config['with_prior_info']
         
         priors['a_scale'] = create_single_prior('a_scale', prior_config_info['a_scale'],
                                                 mu=prior_magnetic_params['a_scale'])
@@ -904,7 +921,8 @@ def create_prior_distributions(prior_config: Dict[str, Any],
     
     return priors
 
-def create_gamma_priors(gamma_config: Dict[str, Any], gamma_thz_init: float) -> Dict[str, Any]:
+def create_gamma_priors(gamma_config: Dict[str, Any], gamma_thz_init: float,
+                       model_type: str = 'H_form') -> Dict[str, Any]:
     """
     gamma事前分布を作成（THz単位）
     
@@ -914,6 +932,8 @@ def create_gamma_priors(gamma_config: Dict[str, Any], gamma_thz_init: float) -> 
         gamma関連の事前分布設定
     gamma_thz_init : float
         gamma初期値 [THz]
+    model_type : str
+        モデルタイプ ('H_form' or 'B_form')
     
     Returns
     -------
@@ -960,8 +980,9 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
         prior_config = config['bayesian_priors']
         initial_values = config['physical_parameters']['initial_values']
         
-        # 磁気パラメータ事前分布
-        magnetic_priors = create_prior_distributions(prior_config, prior_magnetic_params, initial_values)
+        # 磁気パラメータ事前分布（モデルタイプを渡す）
+        magnetic_priors = create_prior_distributions(prior_config, prior_magnetic_params, 
+                                                    initial_values, model_type=model_type)
         a_scale = magnetic_priors['a_scale']
         g_factor = magnetic_priors['g_factor']
         B4 = magnetic_priors['B4']
@@ -978,8 +999,14 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
             gamma_thz_init = gamma_init_raw
             print(f"  gamma初期値: {gamma_thz_init:.4f} THz (既にTHz単位)")
         
-        gamma_priors = create_gamma_priors(prior_config['gamma_parameters'], 
-                                          gamma_thz_init)
+        # B_form専用のgamma設定があればそれを使用
+        if model_type == 'B_form' and 'b_form_gamma_parameters' in prior_config:
+            gamma_config = prior_config['b_form_gamma_parameters']
+            print(f"  🛠️ B_form専用のgammaパラメータを使用")
+        else:
+            gamma_config = prior_config['gamma_parameters']
+        
+        gamma_priors = create_gamma_priors(gamma_config, gamma_thz_init, model_type=model_type)
         log_gamma_mu_base = gamma_priors['log_gamma_mu_base']
         log_gamma_sigma_base = gamma_priors['log_gamma_sigma_base']
         log_gamma_offset_base = gamma_priors['log_gamma_offset_base']
@@ -1048,7 +1075,17 @@ def run_unified_bayesian_fit(datasets: List[Dict[str, Any]],
         Y_obs = pm.Normal('Y_obs', mu=mu, sigma=sigma_adjusted, observed=trans_target)
         
         # サンプリング
-        mcmc_config = config['mcmc']
+        mcmc_config = config['mcmc'].copy()
+        
+        # B_form専用設定のオーバーライド
+        if model_type == 'B_form' and 'b_form_overrides' in config['mcmc']:
+            overrides = config['mcmc']['b_form_overrides']
+            for key, value in overrides.items():
+                mcmc_config[key] = value
+            print(f"  🛠️ B_form専用のMCMC設定を適用:")
+            print(f"     draws={mcmc_config['draws']}, tune={mcmc_config['tune']}, "
+                  f"target_accept={mcmc_config['target_accept']}")
+        
         try:
             # 並列コア数の決定（設定ファイル > チェーン数 > 自動検出）
             n_cores = mcmc_config.get('cores', mcmc_config['chains'])
@@ -1202,15 +1239,24 @@ def main():
         'H_form': bt_specific_params.copy(),
         'B_form': bt_specific_params.copy()
     }
-    max_iterations = config['mcmc']['max_iterations']
     
-    for iteration in range(max_iterations):
-        print(f"\n{'='*70}")
-        print(f"反復 {iteration + 1}/{max_iterations}")
-        print(f"{'='*70}")
-        
+    # モデル別のmax_iterations設定
+    for iteration in range(10):  # 最大反復数の安全な上限
         for model_type in ['H_form', 'B_form']:
-            print(f"\n{model_type}モデルの処理")
+            # モデル別のmax_iterations取得
+            if model_type == 'B_form' and 'b_form_overrides' in config['mcmc']:
+                model_max_iter = config['mcmc']['b_form_overrides'].get('max_iterations', 
+                                                                        config['mcmc']['max_iterations'])
+            else:
+                model_max_iter = config['mcmc']['max_iterations']
+            
+            # このモデルが反復を継続するか判定
+            if iteration >= model_max_iter:
+                continue
+            
+            print(f"\n{'='*70}")
+            print(f"{model_type}: 反復 {iteration + 1}/{model_max_iter}")
+            print(f"{'='*70}")
             
             model_specific_prior = None
             if iteration > 0 and model_type in final_traces:
@@ -1230,8 +1276,15 @@ def main():
             if trace:
                 final_traces[model_type] = trace
                 
+                # モデル別のmax_iterations取得
+                if model_type == 'B_form' and 'b_form_overrides' in config['mcmc']:
+                    model_max_iter = config['mcmc']['b_form_overrides'].get('max_iterations', 
+                                                                            config['mcmc']['max_iterations'])
+                else:
+                    model_max_iter = config['mcmc']['max_iterations']
+                
                 # eps_bg更新（最後の反復でない場合）
-                if iteration < max_iterations - 1:
+                if iteration < model_max_iter - 1:
                     print(f"\n{model_type}のeps_bg更新中...")
                     bayesian_params = extract_bayesian_parameters(trace)
                     updated_bt_params = {}
@@ -1242,6 +1295,12 @@ def main():
                         updated_bt_params[bt_key] = result
                     
                     model_bt_params[model_type] = updated_bt_params
+        
+        # 全モデルが完了したか確認
+        h_max = config['mcmc']['max_iterations']
+        b_max = config['mcmc'].get('b_form_overrides', {}).get('max_iterations', h_max)
+        if iteration >= max(h_max, b_max) - 1:
+            break
     
     # 結果保存
     if final_traces:
