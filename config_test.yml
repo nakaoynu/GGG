@@ -1,5 +1,5 @@
 # ================================================================
-# 磁場・温度一括ベイズ推定プログラム用 設定ファイル (config_unified.yml)
+# 磁場・温度一括ベイズ推定プログラム用 設定ファイル (config_test.yml)
 # unified_weighted_bayesian_fitting.py 専用
 # ================================================================
 
@@ -9,13 +9,13 @@ file_paths:
   # 各ファイルから温度列('K'で終わる)と磁場列('T'で終わる)を自動検出
   data_files:
     # 温度変化データファイル
-    - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Temperature.xlsx"
+    - file: "bayesian_inputs_undet150K/BayesianInput_Raw_Transmittance_Temperature.xlsx"
       sheet: "Normalized Data"
       type: "temperature"
       description: "温度変化データ (B=9.0T固定)"
     
     # 磁場変化データファイル
-    - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Field.xlsx"
+    - file: "bayesian_inputs_undet150K/BayesianInput_Raw_Transmittance_Field.xlsx"
       sheet: "Normalized Data"
       type: "field"
       description: "磁場変化データ (T=4K固定)"
@@ -31,7 +31,7 @@ execution:
   # 
   # c7i.8xlarge (32 vCPU) の推奨設定:
   #   - chains=8, threads_per_chain=4 → 32 vCPU使用
-  threads_per_chain: 4
+  threads_per_chain: 8
 
 # --- 物理パラメータ・初期値 ---
 physical_parameters:
@@ -51,10 +51,10 @@ physical_parameters:
   # 【修正】指導教員の指導に基づき、文献値を初期値に設定
   initial_values:
     eps_bg: 14.20
-    g_factor: 2.00          # 【修正】1.990 → 2.00 (Gd3+標準値)
-    B4: 0.00202             # 【固定】文献値 B4 = 0.00202 K
-    B6: -0.000012           # 【固定】文献値 B6 = -0.000012 K  
-    gamma: 0.018            # 減衰定数γの初期値 [THz]
+    g_factor: 2.00          # g因子はアンカーとして固定（ものさし）
+    B4: 0.0                 # 結晶場はデータから再推定（初期値は0中心）
+    B6: 0.0                 # 結晶場はデータから再推定（初期値は0中心）
+    gamma: 0.11            # 減衰定数γの初期値 [THz]
     a_scale: 0.70           # スケーリング係数の初期値（無次元）
 
 # --- 解析条件設定 ---
@@ -84,175 +84,172 @@ analysis_settings:
 
 # --- ベイズ推定事前分布設定 ---
 bayesian_priors:
-  # 【修正】多峰性克服のため事前分布を大幅に調整
   # 【戦略】
-  # 1. B4, B6を文献値に固定し、それらが自由変数になることを防止
-  # 2. g因子の分散をσ=0.05→0.15に拡大し、1.8-2.2の全範囲を探索可能に
-  # 3. 他のパラメータの制約を調和
-  
+  # - g因子は手作業フィットの知見 (1.9 <= g <= 2.1) を反映して狭い範囲に制約
+  # - 結晶場パラメータ B4, B6 は低周波の吸収強度・形状を支配するため広く探索
+  # - a_scale（全体強度）は結晶場と競合しすぎない程度に拘束（正値制約）
+
   magnetic_parameters:
-    # a_scale パラメータ (TruncatedNormal分布)
-    # 補正係数は1.0周辺に収まるべき
+    g_factor:
+      distribution: "TruncatedNormal"
+      mu: 2.00
+      sigma: 0.01
+      lower: 1.90
+      upper: 2.10
+
+    B4:
+      distribution: "TruncatedNormal"
+      mu: 0.0
+      sigma: 0.005
+      lower: -0.02
+      upper: 0.02
+
+    B6:
+      distribution: "TruncatedNormal"
+      mu: 0.0
+      sigma: 0.00005
+      lower: -0.0002
+      upper: 0.0002
+
     a_scale:
       distribution: "TruncatedNormal"
       mu: 1.0
-      sigma: 0.5          # 【収束対策】探索の自由度を確保（B_formの上限張り付き対策も兼ねる）
-      lower: 0.0
-      upper: 5.0          # 【収束対策】上限張り付きを避ける
-    
-    # g因子 (TruncatedNormal分布)
-    # 【重要修正】Gd3+のg因子多峰性問題への対策
-    # - 多峰性は g ≈ 1.8, 2.1, 2.3 に存在
-    # - 解決策: σ を拡大し、全領域の探索を許容
-    # - 副作用: B4, B6をより強く固定し、代償が起きないようにする
-    g_factor:
-      distribution: "TruncatedNormal"
-      mu: 2.00            # 【修正】文献値に統一
-      sigma: 0.01         # 【収束対策】g因子の多峰性を強く抑制
-      lower: 1.95         # 【収束対策】理論値近傍に拘束
-      upper: 2.05         # 【収束対策】理論値近傍に拘束
-    
-    # 結晶場パラメータ B4 (TruncatedNormal分布)
-    # 【重要修正】Normal → TruncatedNormal + 文献値を中心値に固定
-    # - 指導教員指摘: "B4文献値: 0.00202 K を初期値（中心値）として設定し、
-    #   そこから大きく外れないように制約をかけます"
-    B4:
-      distribution: "Normal"
-      mu: 0.00202
-      sigma: 0.0001
-    
-    # 結晶場パラメータ B6 (TruncatedNormal分布)
-    # 【重要修正】Normal → TruncatedNormal + 文献値を中心値に固定
-    # - "B6文献値: -0.000012 K を初期値（中心値）として設定し、そこから大きく外れないように制約をかけます"
-    B6:
-      distribution: "Normal"
-      mu: -0.000012
-      sigma: 0.000001
-  
-  # 事前情報がある場合の設定（2回目以降の反復で使用）
+      sigma: 0.2
+      lower: 0.5
+      upper: 2.5
+
+  # 事前情報がある場合（2回目以降）
+  # B4/B6/a_scale は前回推定値を中心（muはコード側で上書き）にして探索を継続
   with_prior_info:
-    # a_scale (TruncatedNormal分布)
     a_scale:
       distribution: "TruncatedNormal"
-      sigma: 0.3          # 【収束対策】過度に絞りすぎない
-      lower: 0.0
-      upper: 5.0
-    
-    # g因子 (TruncatedNormal分布)
-    # 【重要】多峰性解消のため、初回と同じ広い分布を保持
+      sigma: 0.15
+      lower: 0.5
+      upper: 2.5
+
     g_factor:
       distribution: "TruncatedNormal"
-      mu: 2.00            # 文献値に統一
+      mu: 2.00
       sigma: 0.01
-      lower: 1.95
-      upper: 2.05
-    
-    # B4 (TruncatedNormal分布)
-    # 【修正】Normal → TruncatedNormal + 文献値を堅く固定
+      lower: 1.90
+      upper: 2.10
+
     B4:
-      distribution: "Normal"
-      mu: 0.00202
-      sigma: 0.0001
-    
-    # B6 (TruncatedNormal分布)
-    # 【修正】Normal → TruncatedNormal + 文献値を堅く固定
+      distribution: "TruncatedNormal"
+      sigma: 0.005
+      lower: -0.02
+      upper: 0.02
+
     B6:
-      distribution: "Normal"
-      mu: -0.000012
-      sigma: 0.000001
-  
-  # gamma（減衰定数）関連の事前分布設定
+      distribution: "TruncatedNormal"
+      sigma: 0.00005
+      lower: -0.0002
+      upper: 0.0002
+
   gamma_parameters:
-    # log(gamma)のベース値
     log_gamma_mu_base:
       distribution: "Normal"
       sigma: 1.0
-    
-    # log(gamma)の分散（各遷移間の相関を制御）
+
     log_gamma_sigma_base:
       distribution: "HalfNormal"
       sigma: 0.5
-    
-    # 各遷移のoffset（7つの遷移に対応）
+
     log_gamma_offset_base:
       distribution: "Normal"
       mu: 0.0
       sigma: 0.5
       shape: 7
-    
-    # 温度依存性係数（線形項）
-    # 【重要修正】多峰性克服と温度依存性の両立を実現
-    # - 前回の temp_gamma_slope = 0.27 (B_form) は多峰性による過度な補償が原因
-    # - B4/B6を文献値で固定することで、slope は自然な温度依存を学習可能に
-    # - 改定: mu=0.003, sigma=0.15 (広さと物理的妥当性のバランス)
-    # - 物理的根拠:
-    #   * ΔT=296K(4K→300K)時: 95%信頼区間で γ(300K)/γ(4K) ∈ [0.1, 10]
-    #   * これは固体物理の一般的な温度依存性範囲に合致
-    #   * narrow prior (σ=0.03) では線形モデルの柔軟性が不足
+
     temp_gamma_slope:
       distribution: "Normal"
-      mu: 0.003           # 基本的には控えめな温度依存性
-      sigma: 0.15         # 【大幅修正】0.03 → 0.15（4K～300K対応可能）
-  
-  # ノイズパラメータ
+      mu: 0.003
+      sigma: 0.15
+
   noise_parameters:
     sigma:
       distribution: "HalfNormal"
       sigma: 0.05
-  
-  # B_form専用の事前分布設定（初回実行時）
-  # B_formは μ_r = 1/(1-χ) の形式で数値的不安定性が高い
-  # より強い制約で収束を促進
+
+  # B_formも同一戦略（g制約 + 結晶場探索 + a_scale拘束）
   b_form_magnetic_parameters:
-    # 【修正】H_formの設定に統一（重要な非識別性は共通）
-    a_scale:
-      distribution: "TruncatedNormal"
-      mu: 1.0             # H_formと統一
-      sigma: 0.5
-      lower: 0.0
-      upper: 5.0
-    
     g_factor:
       distribution: "TruncatedNormal"
-      mu: 2.00            # H_formと統一
+      mu: 2.00
       sigma: 0.01
-      lower: 1.95
-      upper: 2.05
-    
+      lower: 1.90
+      upper: 2.10
+
     B4:
-      distribution: "Normal"
-      mu: 0.00202
-      sigma: 0.0001
-    
+      distribution: "TruncatedNormal"
+      mu: 0.0
+      sigma: 0.005
+      lower: -0.02
+      upper: 0.02
+
     B6:
-      distribution: "Normal"
-      mu: -0.000012
-      sigma: 0.000001
+      distribution: "TruncatedNormal"
+      mu: 0.0
+      sigma: 0.00005
+      lower: -0.0002
+      upper: 0.0002
+
+    a_scale:
+      distribution: "TruncatedNormal"
+      mu: 1.0
+      sigma: 0.2
+      lower: 0.5
+      upper: 2.5
+  b_form_with_prior_info:
+    a_scale:
+      distribution: "TruncatedNormal"
+      sigma: 0.15
+      lower: 0.5
+      upper: 2.5
+
+    g_factor:
+      distribution: "TruncatedNormal"
+      mu: 2.00
+      sigma: 0.01
+      lower: 1.90
+      upper: 2.10
+
+    B4:
+      distribution: "TruncatedNormal"
+      sigma: 0.005
+      lower: -0.02
+      upper: 0.02
+
+    B6:
+      distribution: "TruncatedNormal"
+      sigma: 0.00005
+      lower: -0.0002
+      upper: 0.0002
   
   # B_form専用の事前情報がある場合の設定（2回目以降）
   b_form_with_prior_info:
     a_scale:
       distribution: "TruncatedNormal"
-      sigma: 0.3
+      sigma: 0.15
       lower: 0.0
-      upper: 5.0
+      upper: 2.0
     
     g_factor:
-      distribution: "TruncatedNormal"
       mu: 2.00
-      sigma: 0.01
-      lower: 1.95
-      upper: 2.05
+      distribution: "Normal"
+      sigma: 0.002
     
     B4:
-      mu: 0.00202
-      distribution: "Normal"
-      sigma: 0.0001
+      distribution: "TruncatedNormal"
+      sigma: 0.005
+      lower: -0.02
+      upper: 0.02
     
     B6:
-      mu: -0.000012
-      distribution: "Normal"
-      sigma: 0.000001
+      distribution: "TruncatedNormal"
+      sigma: 0.00005
+      lower: -0.0002
+      upper: 0.0002
   
   # B_form専用のgammaパラメータ
   b_form_gamma_parameters:
@@ -278,21 +275,21 @@ bayesian_priors:
 # --- MCMCサンプリング設定 ---
 mcmc:
   # サンプリング数（チェーンごと）
-  draws: 4000    # 収束改善のため増加
+  draws: 2000    # 収束改善のため増加
   # チューニング（warmup）期間
-  tune: 2000     # 多峰性対策のため増加
+  tune: 1000     # 多峰性対策のため増加
   # 並列チェーン数
   chains: 8
   # 並列実行コア数（chains数と同じに設定）
   cores: 8
   # 受理率の目標値（高いほど慎重にサンプリング）
-  target_accept: 0.95  # 発散防止のため高めに設定
+  target_accept: 0.9  # 発散防止のため高めに設定
   
   # B_form専用の強化設定（収束困難なモデル用）
   b_form_overrides:
-    draws: 8000         # H_formの2倍（より多くのサンプル）
-    tune: 4000          # 長いチューニング期間
-    target_accept: 0.98 # より慎重なサンプリング
+    draws: 2000         # H_formの2倍（より多くのサンプル）
+    tune: 1000          # 長いチューニング期間
+    target_accept: 0.9 # より慎重なサンプリング
     max_iterations: 3   # 追加の反復でeps_bg更新
   # パラメータ更新の反復回数
   # 各反復でeps_bgを更新してベイズ推定を再実行
@@ -301,8 +298,6 @@ mcmc:
   init: "adapt_diag"
   # 再現性確保のための乱数シード
   random_seed: 42
-  # GPU並列計算用のサンプラーを指定（カスタムOpと非互換のためコメントアウト）
-  # nuts_sampler: "numpyro"  
 
 # --- データセット設定（統合処理用） ---
 dataset_config:
