@@ -29,7 +29,7 @@ def _setup_cpu_threads():
     try:
         # YAMLだけ先にインポート（軽量）
         import yaml
-        config_path = pathlib.Path(__file__).parent / "config_01_16.yml"
+        config_path = pathlib.Path(__file__).parent / "config_selected_datasets.yml"
         with open(config_path, 'r', encoding='utf-8') as f:
             temp_config = yaml.safe_load(f)
         
@@ -117,7 +117,7 @@ RAD_S_TO_THZ = 1.0 / THZ_TO_RAD_S  # rad/s → THz 変換係数
 def load_config(config_path: Optional[Union[str, pathlib.Path]] = None) -> Dict[str, Any]:
     """設定ファイル(YAML)を読み込み、デフォルト値とマージする"""
     if config_path is None:
-        config_path = pathlib.Path(__file__).parent / "config_01_16.yml"
+        config_path = pathlib.Path(__file__).parent / "config_selected_datasets.yml"
     
     # デフォルト設定値（複数ファイル対応）
     default_config = {
@@ -524,6 +524,19 @@ def load_unified_data(config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]
     freq_col = 'Frequency (THz)'
     B_fixed = config['physical_parameters']['B_fixed']
     T_fixed = config['physical_parameters'].get('T_fixed', 4.0)
+
+    # 【追加】選別リストの取得
+    selected_temps = config['file_paths'].get('selected_datasets', {}).get('temperatures', [])
+    selected_fields = config['file_paths'].get('selected_datasets', {}).get('fields', [])
+    
+    # リストが空なら「全データ使用」とみなすフラグ
+    use_filter_temp = len(selected_temps) > 0
+    use_filter_field = len(selected_fields) > 0
+    
+    if use_filter_temp:
+        print(f"🎯 温度データのフィルタリング有効: {selected_temps} K のみを解析します")
+    if use_filter_field:
+        print(f"🎯 磁場データのフィルタリング有効: {selected_fields} T のみを解析します")
     
     # 各ファイルを処理
     for file_idx, file_config in enumerate(file_configs, 1):
@@ -555,6 +568,10 @@ def load_unified_data(config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]
             for col in temp_cols:
                 try:
                     temp_value = float(col.replace('K', ''))
+                    if use_filter_temp:
+                        if temp_value not in selected_temps:
+                            print(f"      ⏭️ T={temp_value}K は選別リストにないためスキップ")
+                            continue
                     df_clean = df[[freq_col, col]].dropna()
                     freq, trans = df_clean[freq_col].values.astype(np.float64), df_clean[col].values.astype(np.float64)
                     
@@ -580,6 +597,10 @@ def load_unified_data(config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]
             for col in field_cols:
                 try:
                     B_value = float(col.replace('T', ''))
+                    if use_filter_field:
+                        if B_value not in selected_fields:
+                            print(f"      ⏭️ B={B_value}T は選別リストにないためスキップ")
+                            continue
                     df_clean = df[[freq_col, col]].dropna()
                     freq, trans = df_clean[freq_col].values.astype(np.float64), df_clean[col].values.astype(np.float64)
                     

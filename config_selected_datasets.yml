@@ -1,0 +1,327 @@
+# ================================================================
+# 磁場・温度一括ベイズ推定プログラム用 設定ファイル (config_selected_datasets.yml)
+# test.py 専用
+# 
+# 【修正方針】少数精鋭データセット（8セット）による収束改善版
+# - 温度4点（4K, 20K, 80K, 120K）+ 磁場4点（4.2T, 5.7T, 7.7T, 9.0T）
+# - 指導教員指示に基づく方針転換
+# ================================================================
+
+# --- ファイルパス設定 ---
+file_paths:
+  # 複数データファイル対応
+  # 各ファイルから温度列('K'で終わる)と磁場列('T'で終わる)を自動検出
+  data_files:
+    # 温度変化データファイル
+    - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Temperature.xlsx"
+      sheet: "Normalized Data"
+      type: "temperature"
+      description: "温度変化データ (B=9.0T固定)"
+    
+    # 磁場変化データファイル
+    - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Field.xlsx"
+      sheet: "Normalized Data"
+      type: "field"
+      description: "磁場変化データ (T=4K固定)"
+  
+  # 【新規追加】解析対象とするデータセットの選別リスト
+  # ここに記載された値の列のみを読み込みます
+  selected_datasets:
+    # 温度変化データ用: 低温2点 + 中温2点
+    # 高温300Kを除外し、150K以下で議論可能な範囲に限定
+    temperatures: [4.0, 20.0, 80.0, 120.0]
+    
+    # 磁場変化データ用: 低磁場1点 + 中磁場2点 + 高磁場1点
+    # ポラリトン分裂の進展を追跡できる範囲を選定
+    fields: [4.2, 5.7, 7.7, 9.0]
+  
+  # 結果を出力する親ディレクトリ名
+  results_parent_dir: "fullsize_analysis_results_selected"
+
+# --- 実行環境設定（CPU並列化） ---
+execution:
+  # 1チェーンあたりのCPUスレッド数（行列演算の並列化）
+  # 
+  # ベクトル化計算により、NumPyブロードキャストがMKL/OpenBLASを活用
+  # 
+  # c7i.8xlarge (32 vCPU) の推奨設定:
+  #   - chains=8, threads_per_chain=4 → 32 vCPU使用
+  threads_per_chain: 4
+
+# --- 物理パラメータ・初期値 ---
+physical_parameters:
+  # 温度変化データの固定磁場 (Tesla)
+  B_fixed: 9.0
+  # 磁場変化データの固定温度 (Kelvin) - load_unified_data関数内で使用
+  T_fixed: 4.0
+  # 膜厚 (meter) - 固定値として使用
+  d_fixed: 157.8e-6
+  # スピン量子数
+  s: 3.5
+  # スピン密度 (m^-3)
+  N_spin: 1.9386e+28 # 24 / 1.238 * 1e27
+
+  # --- パラメータの初期値 ---
+  # 【THz単位系】数値計算安定性のため、周波数・緩和率はTHz単位で統一
+  # 【修正】指導教員の指導に基づき、文献値を初期値に設定
+  initial_values:
+    eps_bg: 14.20
+    g_factor: 2.00          # 【修正】1.990 → 2.00 (Gd3+標準値)
+    B4: 0.00202             # 【固定】文献値 B4 = 0.00202 K
+    B6: -0.000012           # 【固定】文献値 B6 = -0.000012 K  
+    gamma: 0.018            # 減衰定数γの初期値 [THz]
+    a_scale: 1.0           # スケーリング係数の初期値（無次元）
+
+# --- 解析条件設定 ---
+analysis_settings:
+  # 温度・磁場データの自動検出設定
+  # - 温度列: 列名が'K'で終わる列を自動検出(例: '4K', '10K', '30K', '100K', '300K', ...)
+  # - 磁場列: 列名が'T'で終わる列を自動検出(例: '1T', '2T', '3T', ...)
+  # ※温度列と磁場列の両方が自動検出され、温度列を除外した上で磁場列が判定される
+  # ※Excelファイルにこれらの列がない場合は処理されない
+  
+  # 周波数領域のカットオフ値 (THz)
+  low_freq_cutoff: 0.361505   # 低周波カットオフ（現在未使用）
+  high_freq_cutoff: 0.45       # 高周波カットオフ（eps_bgフィッティング用）
+  
+  # --- 重み付け設定 ---
+  weight_settings:
+    # ピーク検出の閾値設定
+    peak_height_threshold: 0.01      # ピーク検出の最小高さ（正規化透過率）
+    peak_prominence_threshold: 0.04  # ピーク検出のプロミネンス閾値
+    peak_distance: 10                # ピーク間の最小距離（データ点数）
+    
+    # 重み値設定  
+    lp_up_peak_weight: 1.0          # LP・UPピーク領域の重み
+    between_peaks_weight: 0.4       # LP-UP間の重み
+    high_freq_peak_weight: 1.0      # 高周波ピークの重み
+    background_weight: 0.01         # その他の領域の重み（バックグラウンド）
+
+# --- ベイズ推定事前分布設定 ---
+bayesian_priors:
+  # 【修正】少数データセットに最適化した事前分布設定
+  # 【戦略】
+  # 1. B4, B6を文献値に固定し、それらが自由変数になることを防止
+  # 2. g因子の分散を狭く保ち、物理的に妥当な範囲に強く拘束
+  # 3. temp_gamma_slope は高温データ（300K）除外により推定力低下→保守的に設定
+  
+  magnetic_parameters:
+    # a_scale パラメータ (TruncatedNormal分布)
+    # 補正係数は1.0周辺に収まるべき
+    a_scale:
+      distribution: "TruncatedNormal"
+      mu: 1.0
+      sigma: 0.5          # 【維持】探索の自由度を確保
+      lower: 0.3
+      upper: 3.0
+    
+    # g因子 (TruncatedNormal分布)
+    # 【重要】データ数減少に対応し、物理的制約を維持
+    g_factor:
+      distribution: "TruncatedNormal"
+      mu: 2.00
+      sigma: 0.01         # 【維持】理論値近傍に強く拘束
+      lower: 1.95
+      upper: 2.05
+    
+    # 結晶場パラメータ B4 (Normal分布)
+    # 【重要修正】文献値を中心値として固定
+    B4:
+      distribution: "Normal"
+      mu: 0.00202
+      sigma: 0.0001
+    
+    # 結晶場パラメータ B6 (Normal分布)
+    # 【重要修正】文献値を中心値として固定
+    B6:
+      distribution: "Normal"
+      mu: -0.000012
+      sigma: 0.000001
+  
+  # 事前情報がある場合の設定（2回目以降の反復で使用）
+  with_prior_info:
+    # a_scale (TruncatedNormal分布)
+    a_scale:
+      distribution: "TruncatedNormal"
+      sigma: 0.3
+      lower: 0.3
+      upper: 3.0
+    
+    # g因子 (TruncatedNormal分布)
+    g_factor:
+      distribution: "TruncatedNormal"
+      mu: 2.00
+      sigma: 0.01
+      lower: 1.95
+      upper: 2.05
+    
+    # B4 (Normal分布)
+    B4:
+      distribution: "Normal"
+      mu: 0.00202
+      sigma: 0.0001
+    
+    # B6 (Normal分布)
+    B6:
+      distribution: "Normal"
+      mu: -0.000012
+      sigma: 0.000001
+  
+  # gamma（減衰定数）関連の事前分布設定
+  gamma_parameters:
+    # log(gamma)のベース値
+    log_gamma_mu_base:
+      distribution: "Normal"
+      sigma: 1.0
+    
+    # log(gamma)の分散（各遷移間の相関を制御）
+    log_gamma_sigma_base:
+      distribution: "HalfNormal"
+      sigma: 0.5
+    
+    # 各遷移のoffset（7つの遷移に対応）
+    log_gamma_offset_base:
+      distribution: "Normal"
+      mu: 0.0
+      sigma: 0.5
+      shape: 7
+    
+    # 温度依存性係数（線形項）
+    # 【重要修正】高温データ除外に伴う保守的な設定
+    # - データ範囲: 4K～120K (ΔT=116K)
+    # - 推定力低下を考慮し、σを小さく設定して暴走を防止
+    # - 物理的根拠: 150K以下では温度依存性は比較的緩やか
+    temp_gamma_slope:
+      distribution: "Normal"
+      mu: 0.003           # 基本的には控えめな温度依存性
+      sigma: 0.01         # 【修正】0.15 → 0.01（高温データ除外に対応）
+  
+  # ノイズパラメータ
+  noise_parameters:
+    sigma:
+      distribution: "HalfNormal"
+      sigma: 0.05
+  
+  # B_form専用の事前分布設定（初回実行時）
+  # B_formは μ_r = 1/(1-χ) の形式で数値的不安定性が高い
+  # より強い制約で収束を促進
+  b_form_magnetic_parameters:
+    a_scale:
+      distribution: "TruncatedNormal"
+      mu: 1.0
+      sigma: 0.5
+      lower: 0.3
+      upper: 5.0
+    
+    g_factor:
+      distribution: "TruncatedNormal"
+      mu: 2.00
+      sigma: 0.01
+      lower: 1.95
+      upper: 2.05
+    
+    B4:
+      distribution: "Normal"
+      mu: 0.00202
+      sigma: 0.0001
+    
+    B6:
+      distribution: "Normal"
+      mu: -0.000012
+      sigma: 0.000001
+  
+  # B_form専用の事前情報がある場合の設定（2回目以降）
+  b_form_with_prior_info:
+    a_scale:
+      distribution: "TruncatedNormal"
+      sigma: 0.3
+      lower: 0.3
+      upper: 3.0
+    
+    g_factor:
+      distribution: "TruncatedNormal"
+      mu: 2.00
+      sigma: 0.01
+      lower: 1.95
+      upper: 2.05
+    
+    B4:
+      mu: 0.00202
+      distribution: "Normal"
+      sigma: 0.0001
+    
+    B6:
+      mu: -0.000012
+      distribution: "Normal"
+      sigma: 0.000001
+  
+  # B_form専用のgammaパラメータ
+  b_form_gamma_parameters:
+    log_gamma_mu_base:
+      distribution: "Normal"
+      sigma: 0.8
+    
+    log_gamma_sigma_base:
+      distribution: "HalfNormal"
+      sigma: 0.4
+    
+    log_gamma_offset_base:
+      distribution: "Normal"
+      mu: 0.0
+      sigma: 0.4
+      shape: 7
+    
+    temp_gamma_slope:
+      distribution: "Normal"
+      mu: 0.003
+      sigma: 0.01         # 【修正】B_formも同様に保守的設定
+
+# --- MCMCサンプリング設定 ---
+mcmc:
+  # サンプリング数（チェーンごと）
+  draws: 2000    # 収束改善のため増加
+  # チューニング（warmup）期間
+  tune: 1000     # 多峰性対策のため増加
+  # 並列チェーン数
+  chains: 8
+  # 並列実行コア数（chains数と同じに設定）
+  cores: 8
+  # 受理率の目標値（高いほど慎重にサンプリング）
+  target_accept: 0.9  # 発散防止のため高めに設定
+  
+  # B_form専用の強化設定（収束困難なモデル用）
+  b_form_overrides:
+    draws: 2000         # H_formの2倍（より多くのサンプル）
+    tune: 1000          # 長いチューニング期間
+    target_accept: 0.9  # より慎重なサンプリング
+    max_iterations: 2   # 追加の反復でeps_bg更新
+  # パラメータ更新の反復回数
+  # 各反復でeps_bgを更新してベイズ推定を再実行
+  max_iterations: 2
+  # 初期化戦略
+  init: "adapt_diag"
+  # 再現性確保のための乱数シード
+  random_seed: 42
+  # GPU並列計算用のサンプラーを指定（カスタムOpと非互換のためコメントアウト）
+  # nuts_sampler: "numpyro"  
+
+# --- データセット設定（統合処理用） ---
+dataset_config:
+  # 温度変化データの説明
+  temp_variable:
+    enabled: true
+    description: "温度を変数、磁場を固定したデータセット（選別版：4K, 20K, 80K, 120K）"
+    # B_fixedと自動検出された温度列('K'で終わる列)から自動生成
+  
+  # 磁場変化データの説明
+  field_variable:
+    enabled: true
+    description: "磁場を変数、温度を固定したデータセット（選別版：4.2T, 5.7T, 7.7T, 9.0T）"
+    # T_fixedと自動検出された磁場列('T'で終わる列)から生成
+
+# --- 出力設定 ---
+output:
+  # 保存するファイル
+  save_trace: true              # traceファイル（.nc）を保存
+  save_parameters: true         # パラメータCSVを保存
+  save_bt_params: true          # (B,T)別光学パラメータCSVを保存
