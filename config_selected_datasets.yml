@@ -22,7 +22,7 @@ file_paths:
     - file: "bayesian_inputs/BayesianInput_Raw_Transmittance_Field.xlsx"
       sheet: "Normalized Data"
       type: "field"
-      description: "磁場変化データ (T=4K固定)"
+      description: "磁場変化データ (T=1.5K固定)"
   
   # 【新規追加】解析対象とするデータセットの選別リスト
   # ここに記載された値の列のみを読み込みます
@@ -53,7 +53,7 @@ physical_parameters:
   # 温度変化データの固定磁場 (Tesla)
   B_fixed: 9.0
   # 磁場変化データの固定温度 (Kelvin) - load_unified_data関数内で使用
-  T_fixed: 4.0
+  T_fixed: 1.5
   # 膜厚 (meter) - 固定値として使用
   d_fixed: 157.8e-6
   # スピン量子数
@@ -302,8 +302,6 @@ mcmc:
   init: "adapt_diag"
   # 再現性確保のための乱数シード
   random_seed: 42
-  # GPU並列計算用のサンプラーを指定（カスタムOpと非互換のためコメントアウト）
-  # nuts_sampler: "numpyro"  
 
 # --- データセット設定（統合処理用） ---
 dataset_config:

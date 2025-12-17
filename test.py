@@ -523,7 +523,7 @@ def load_unified_data(config: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]
     
     freq_col = 'Frequency (THz)'
     B_fixed = config['physical_parameters']['B_fixed']
-    T_fixed = config['physical_parameters'].get('T_fixed', 4.0)
+    T_fixed = config['physical_parameters'].get('T_fixed', 1.5)
 
     # 【追加】選別リストの取得
     selected_temps = config['file_paths'].get('selected_datasets', {}).get('temperatures', [])
