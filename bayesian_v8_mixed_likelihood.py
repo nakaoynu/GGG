@@ -1,11 +1,19 @@
 """
-Bayesian Hierarchical Analysis with Mixed Likelihood (v8.0)
-領域別尤度: ポラリトン→透過率スペクトル形状, 共振器→FWHM のみ
+Bayesian Hierarchical Analysis with Mixed Likelihood (v8.1)
+領域別尤度: ポラリトン→透過率スペクトル形状, 共振器→FWHM + ピーク位置
 
-【v8.0 新機能 - ggg_research_strategy.pptx 解析方針実装】
+【v8.1 改善 — レビュー Issue #1-#4 修正】
+★ キャビティピーク位置尤度を追加 (Issue #1: Critical fix)
+  - ピーク周波数の StudentT 尤度項を共振器領域に追加
+  - FWHM のみでは捉えられなかったピーク位置の制約を実現
+★ FWHM フォールバック修正 (Issue #2): ペナルティ値を使用
+★ ベイズ因子計算の堅牢化 (Issue #3): flatten + nanmean
+★ 領域別定量指標の追加 (Issue #4): Pol/Cav RMSE, Δf_peak
+
+【v8.0 基盤機能 — ggg_research_strategy.pptx 解析方針実装】
 ★ 領域別複合尤度:
   - ポラリトン領域: p(D|Θ) ∝ T(ω, Θ, weight_pol) — スペクトル形状で推定
-  - 高次共振器領域: p(D|Θ) ∝ FWHM(ω, Θ, weight_cav) — FWHMのみで推定
+  - 高次共振器領域: p(D|Θ) ∝ FWHM(ω, Θ) + f_peak(ω, Θ) — FWHM+ピーク位置
   - 背景領域: weight 0.01 で包含
 ★ 複合尤度は pm.Potential で実装（log 尤度の加算）
 
@@ -49,6 +57,7 @@ GAMMA_STD_PRIOR        = 0.092
 # 【新設定】FWHM 尤度のノイズレベル [THz]
 # ポラリトン尤度 (~100点) とスケール整合するよう調整
 SIGMA_FWHM = 0.005     # 初期値 5 GHz — チューニング対象
+SIGMA_PEAK_FREQ = 0.005  # THz (5 GHz) — キャビティピーク位置の尤度σ
 
 # 背景領域尤度を使用するか
 USE_BACKGROUND_LIKELIHOOD = True
@@ -356,6 +365,31 @@ def compute_fwhm_representative(freq, trans, cavity_lower=CAVITY_LOWER):
     return float(widths_samples[0] * df)
 
 
+def compute_cavity_peak_info(freq, trans, cavity_lower=CAVITY_LOWER):
+    """
+    共振器領域の最も顕著なピークの FWHM とピーク周波数を返す。
+    Returns: (fwhm, peak_freq) — ピーク未検出時は (None, None)
+    """
+    mask = freq >= cavity_lower
+    if not np.any(mask):
+        return None, None
+
+    freq_cav  = freq[mask]
+    trans_cav = trans[mask]
+
+    peaks, props = find_peaks(trans_cav, prominence=0.03, width=2)
+    if len(peaks) == 0:
+        return None, None
+
+    best_idx = np.argmax(props['prominences'])
+    peak_idx = peaks[best_idx]
+
+    widths_samples, _, _, _ = peak_widths(trans_cav, [peak_idx], rel_height=0.5)
+    df = freq[1] - freq[0] if len(freq) > 1 else 1.0
+
+    return float(widths_samples[0] * df), float(freq_cav[peak_idx])
+
+
 # ============================================================================
 # ピーク検出・重み配列（test_fin_2a.py 準拠）
 # ============================================================================
@@ -420,8 +454,8 @@ def load_all_datasets(target_data_list):
             polariton_regions, cavity_regions = detect_peaks_and_classify(freq, trans)
             weight_array = create_weight_array(freq, trans, polariton_regions, cavity_regions)
 
-            # 【新規】観測 FWHM の計算
-            fwhm_obs = compute_fwhm_representative(freq, trans)
+            # 【新規】観測 FWHM + ピーク位置の計算
+            fwhm_obs, peak_freq_obs = compute_cavity_peak_info(freq, trans)
 
             label = f"{config['B']:.1f}T" if config['T'] == 1.5 else f"{config['T']:.0f}K"
 
@@ -436,6 +470,7 @@ def load_all_datasets(target_data_list):
                 'cavity_regions':   cavity_regions,
                 'sigma':            np.full_like(freq, 0.01),
                 'fwhm_obs':         fwhm_obs,   # None if no cavity peak found
+                'peak_freq_obs':    peak_freq_obs,  # None if no cavity peak found
             }
             datasets.append(dataset)
 
@@ -499,6 +534,7 @@ class MixedOutputModelOp(Op):
         # FWHM が存在するデータセットのインデックスと観測値
         self.fwhm_indices = [i for i, d in enumerate(datasets) if d['fwhm_obs'] is not None]
         self.fwhm_obs_vec = np.array([datasets[i]['fwhm_obs'] for i in self.fwhm_indices])
+        self.peak_freq_obs_vec = np.array([datasets[i]['peak_freq_obs'] for i in self.fwhm_indices])
 
     def make_node(self, a_scale_scaled, gamma_vec_scaled, g_factor_scaled,
                   B4_scaled, B6_scaled, eps_bg_scaled):
@@ -509,13 +545,14 @@ class MixedOutputModelOp(Op):
         B6_scaled       = pt.as_tensor_variable(B6_scaled)
         eps_bg_scaled   = pt.as_tensor_variable(eps_bg_scaled)
 
-        out_trans = pt.dvector()
-        out_fwhm  = pt.dvector()
+        out_trans     = pt.dvector()
+        out_fwhm      = pt.dvector()
+        out_peak_freq = pt.dvector()
 
         return Apply(self,
                      [a_scale_scaled, gamma_vec_scaled, g_factor_scaled,
                       B4_scaled, B6_scaled, eps_bg_scaled],
-                     [out_trans, out_fwhm])
+                     [out_trans, out_fwhm, out_peak_freq])
 
     def perform(self, _node, inputs, output_storage):
         a_scale_scaled, gamma_vec_scaled, g_factor_scaled, B4_scaled, B6_scaled, eps_bg_scaled = inputs
@@ -533,6 +570,7 @@ class MixedOutputModelOp(Op):
 
         all_trans_pred = []
         fwhm_pred_list = []
+        peak_freq_pred_list = []
 
         for idx, data in enumerate(self.datasets):
             freq = data['freq']
@@ -553,16 +591,20 @@ class MixedOutputModelOp(Op):
             trans_pred = calculate_transmission(freq, mu_r, d_fixed, eps_bg)
             all_trans_pred.append(trans_pred)
 
-            # FWHM の計算（共振器ピークが存在するデータセットのみ）
+            # FWHM + ピーク位置の計算（共振器ピークが存在するデータセットのみ）
             if idx in self.fwhm_indices:
-                fwhm_val = compute_fwhm_representative(freq, trans_pred)
+                fwhm_val, peak_freq_val = compute_cavity_peak_info(freq, trans_pred)
                 if fwhm_val is None:
-                    # フォールバック: 観測値をそのまま使用（残差 = 0 にする）
-                    fwhm_val = self.fwhm_obs_vec[self.fwhm_indices.index(idx)]
+                    # ペナルティ: 観測値の2倍を使用し大きな残差を発生させる
+                    obs_idx = self.fwhm_indices.index(idx)
+                    fwhm_val = self.fwhm_obs_vec[obs_idx] * 2.0
+                    peak_freq_val = self.peak_freq_obs_vec[obs_idx] + 0.1
                 fwhm_pred_list.append(fwhm_val)
+                peak_freq_pred_list.append(peak_freq_val)
 
         output_storage[0][0] = np.concatenate(all_trans_pred)
         output_storage[1][0] = np.array(fwhm_pred_list) if fwhm_pred_list else np.array([0.0])
+        output_storage[2][0] = np.array(peak_freq_pred_list) if peak_freq_pred_list else np.array([0.5])
 
 
 # ============================================================================
@@ -615,10 +657,12 @@ def compute_bayes_factor_smc(trace_H, trace_B):
         has_H = hasattr(trace_H, 'sample_stats') and 'log_marginal_likelihood' in trace_H.sample_stats
         has_B = hasattr(trace_B, 'sample_stats') and 'log_marginal_likelihood' in trace_B.sample_stats
         if has_H and has_B:
-            lml_H = float(trace_H.sample_stats['log_marginal_likelihood'].values.mean())
-            lml_B = float(trace_B.sample_stats['log_marginal_likelihood'].values.mean())
-            lml_H_std = float(trace_H.sample_stats['log_marginal_likelihood'].values.std())
-            lml_B_std = float(trace_B.sample_stats['log_marginal_likelihood'].values.std())
+            lml_H_vals = np.asarray(trace_H.sample_stats['log_marginal_likelihood'].values).flatten()
+            lml_B_vals = np.asarray(trace_B.sample_stats['log_marginal_likelihood'].values).flatten()
+            lml_H = float(np.nanmean(lml_H_vals))
+            lml_B = float(np.nanmean(lml_B_vals))
+            lml_H_std = float(np.nanstd(lml_H_vals))
+            lml_B_std = float(np.nanstd(lml_B_vals))
             log_BF = lml_H - lml_B
             log_BF_se = np.sqrt(lml_H_std ** 2 + lml_B_std ** 2)
             log10_BF  = log_BF / np.log(10)
@@ -693,7 +737,17 @@ def plot_posterior_predictive_spectra(trace, datasets, model_form='H', save_dir=
         trans_median = np.median(trans_samples, axis=0)
         trans_hdi    = az.hdi(trans_samples, hdi_prob=0.94)
 
-        fwhm_pred = compute_fwhm_representative(freq, trans_median)
+        fwhm_pred, peak_freq_pred = compute_cavity_peak_info(freq, trans_median)
+        peak_freq_obs = data.get('peak_freq_obs')
+
+        # 領域別 RMSE
+        pol_mask = freq < POLARITON_UPPER
+        cav_mask = freq >= CAVITY_LOWER
+        rmse_pol = np.sqrt(np.mean((trans_obs[pol_mask] - trans_median[pol_mask]) ** 2)) if np.any(pol_mask) else np.nan
+        rmse_cav = np.sqrt(np.mean((trans_obs[cav_mask] - trans_median[cav_mask]) ** 2)) if np.any(cav_mask) else np.nan
+
+        # ピーク位置誤差
+        peak_err_ghz = abs(peak_freq_pred - peak_freq_obs) * 1000 if (peak_freq_pred and peak_freq_obs) else np.nan
 
         # 領域ハイライト
         for f_s, f_e in data['polariton_regions']:
@@ -708,7 +762,10 @@ def plot_posterior_predictive_spectra(trace, datasets, model_form='H', save_dir=
         rmse = np.sqrt(np.mean((trans_obs - trans_median) ** 2))
         fwhm_str = (f"FWHM obs={fwhm_obs*1000:.1f} pred={fwhm_pred*1000:.1f} GHz"
                     if fwhm_obs and fwhm_pred else "")
-        ax.set_title(f"{label}  RMSE={rmse:.4f}\n{fwhm_str}", fontsize=9, fontweight='bold')
+        region_str = f"Pol={rmse_pol:.4f} Cav={rmse_cav:.4f}"
+        peak_str = f" Δf={peak_err_ghz:.1f}GHz" if not np.isnan(peak_err_ghz) else ""
+        ax.set_title(f"{label}  RMSE={rmse:.4f} ({region_str}){peak_str}\n{fwhm_str}",
+                     fontsize=8, fontweight='bold')
         ax.set_xlabel('Frequency (THz)', fontsize=9)
         ax.set_ylabel('Transmittance',   fontsize=9)
         ax.legend(fontsize=6, loc='best')
@@ -1005,9 +1062,11 @@ def build_pymc_model(datasets, model_form, v6_params_H, v6_params_B):
     # 有効 σ (weight が大きいほど σ が小さい = 精度が高い)
     sigma_eff = 0.01 / np.sqrt(weight_concat)
 
-    # FWHM 観測値
+    # FWHM 観測値 + ピーク位置観測値
     fwhm_obs_vec = model_op.fwhm_obs_vec  # shape (n_fwhm,)
+    peak_freq_obs_vec = model_op.peak_freq_obs_vec  # shape (n_fwhm,)
     sigma_fwhm   = np.full_like(fwhm_obs_vec, SIGMA_FWHM) if len(fwhm_obs_vec) > 0 else np.array([SIGMA_FWHM])
+    sigma_peak_freq = np.full_like(peak_freq_obs_vec, SIGMA_PEAK_FREQ) if len(peak_freq_obs_vec) > 0 else np.array([SIGMA_PEAK_FREQ])
 
     model = pm.Model()
     with model:
@@ -1075,9 +1134,9 @@ def build_pymc_model(datasets, model_form, v6_params_H, v6_params_B):
             log_gamma_sd * SCALING_FACTORS['gamma'])
 
         # ------------------------------------------
-        # 7. 【新規】MixedOutputModelOp で trans_pred + fwhm_pred を取得
+        # 7. 【新規】MixedOutputModelOp で trans_pred + fwhm_pred + peak_freq_pred を取得
         # ------------------------------------------
-        trans_pred_concat, fwhm_pred_vec = model_op(
+        trans_pred_concat, fwhm_pred_vec, peak_freq_pred_vec = model_op(
             a_scale_scaled, gamma_vec_scaled, g_factor_scaled,
             B4_scaled, B6_scaled, eps_bg_scaled)
 
@@ -1094,11 +1153,16 @@ def build_pymc_model(datasets, model_form, v6_params_H, v6_params_B):
             ll_pol   = pm.logp(dist_pol, obs_pol)
             pm.Potential('ll_polariton', ll_pol.sum())
 
-        # 8-b. 共振器領域 (FWHM のみ)
+        # 8-b. 共振器領域 (FWHM + ピーク位置)
         if len(fwhm_obs_vec) > 0:
             dist_fwhm = pm.StudentT.dist(nu=NU_STUDENTT, mu=fwhm_pred_vec, sigma=sigma_fwhm)
             ll_fwhm   = pm.logp(dist_fwhm, fwhm_obs_vec)
             pm.Potential('ll_cavity_fwhm', ll_fwhm.sum())
+
+            # 8-b2. 共振器ピーク位置マッチング (Issue #1 修正)
+            dist_peak = pm.StudentT.dist(nu=NU_STUDENTT, mu=peak_freq_pred_vec, sigma=sigma_peak_freq)
+            ll_peak   = pm.logp(dist_peak, peak_freq_obs_vec)
+            pm.Potential('ll_cavity_peak_freq', ll_peak.sum())
 
         # 8-c. 背景領域 (スペクトル、weight=0.01)
         if USE_BACKGROUND_LIKELIHOOD and np.any(bg_mask_concat):
@@ -1129,8 +1193,8 @@ def main():
         SMC_CHAINS  = 2
 
     print(f"\n{'='*80}")
-    print("Bayesian Analysis v8.0 — Mixed Likelihood (Polariton: spectrum / Cavity: FWHM)")
-    print(f"ggg_research_strategy.pptx 解析方針実装")
+    print("Bayesian Analysis v8.1 — Mixed Likelihood (Polariton: spectrum / Cavity: FWHM + peak position)")
+    print(f"ggg_research_strategy.pptx 解析方針実装 + レビュー Issue #1-#4 修正")
     print(f"{'='*80}")
 
     # v6 参照値読み込み
